@@ -6,7 +6,7 @@ WORKDIR /app
 
 # 1. Copy config files first to cache dependencies
 COPY rebar.config rebar.lock ./
-RUN rebar3 get-deps
+RUN rebar3 compile
 
 # 2. Copy source and build the release
 COPY . .
