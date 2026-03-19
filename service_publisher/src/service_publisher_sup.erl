@@ -12,6 +12,7 @@ service_publisher top level supervisor.
 -define(SERVER, ?MODULE).
 
 start_link() ->
+	io:format("Supervisor Started~n"),
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
 %% sup_flags() = #{strategy => strategy(),         % optional
@@ -25,17 +26,17 @@ start_link() ->
 %%                  modules => modules()}   % optional
 init([]) ->
     SupFlags = #{
-        strategy => one_for_all,
-        intensity => 0,
-        period => 1
+        strategy => one_for_one,
+        intensity => 3,
+        period => 5
     },
     ChildSpecs = [
-		  #{id => service_publisher_app,
-          start => {service_publisher_app, start_link, []},
+        #{id => service_publisher_srv,
+          start => {service_publisher_srv, start_link, []},
           restart => permanent,
           shutdown => 5000,
           type => worker,
-          modules => [service_publisher_app]}
+          modules => [service_publisher_srv]}
     ],
     {ok, {SupFlags, ChildSpecs}}.
 
