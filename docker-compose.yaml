@@ -83,12 +83,12 @@ services:
     depends_on:
       - mosquitto
 
-  # subscriber:
-  #   build: ./service-subscriber
-  #   container_name: subscriber
-  #   restart: unless-stopped
-  #   depends_on:
-  #     - mosquitto
+  subscriber:
+    build: ./service_subscriber
+    container_name: subscriber
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
 
 volumes:
   mosquitto-storage: {}

@@ -1,0 +1,15 @@
+{application, service_subscriber, [
+    {description, "An OTP application"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {mod, {service_subscriber_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+		emqtt
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, []}
+ ]}.
