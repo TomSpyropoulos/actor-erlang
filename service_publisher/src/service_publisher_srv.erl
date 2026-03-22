@@ -67,14 +67,9 @@ handle_info(publish_tick,
 	RandomValue = integer_to_binary(rand:uniform(10)),
 	Timestamp = calendar:system_time_to_rfc3339(erlang:system_time(millisecond), [{unit, millisecond}, {offset, "Z"}]),
 	% Build a proper JSON string as an iolist and convert to binary
-	JsonIolist = [
-		<<"{\"device_name\":\"">>, SensorBin,
-		<<"\",\"value\":">>, RandomValue,
-		<<",\"timestamp\":">>, Timestamp,
-		<<"}">>
-	],
-	JsonStr = iolist_to_binary(JsonIolist),
-    emqtt:publish(Pid, Topic, JsonStr, 0),
+	JsonMap = #{<<"device_name">> => SensorBin, <<"timestamp">> => Timestamp, <<"value">> => RandomValue},
+	Json = json:encode(JsonMap),
+    emqtt:publish(Pid, Topic, Json, 0),
 	io:format("Published Message~n"),
     % Schedule the next tick
     erlang:send_after(Interval, self(), publish_tick),

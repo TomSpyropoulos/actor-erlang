@@ -1,4 +1,4 @@
-FROM erlang:26.2.5.18 AS builder
+FROM erlang:29 AS builder
 
 RUN apt-get update && apt-get install -y cmake
 
@@ -14,7 +14,7 @@ RUN rebar3 compile
 RUN rebar3 as prod release
 
 # Stage 2: Runtime
-FROM erlang:26.2.5.18-slim
+FROM erlang:slim
 
 WORKDIR /app
 
