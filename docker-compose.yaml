@@ -78,7 +78,6 @@ services:
 
   publisher:
     build: ./service_publisher
-    container_name: publisher
     restart: unless-stopped
     depends_on:
       - mosquitto

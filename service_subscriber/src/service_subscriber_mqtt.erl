@@ -72,8 +72,7 @@ handle_info(connect, #state{conn_opts = Opts} = State) ->
 
 %% Handle incoming publish messages - support a few common shapes
 handle_info({publish, #{topic := Topic, payload := Payload}}, State) when is_binary(Topic) ->
-    io:format("Case 1: Received publish message: ~p -> ~p~n", [Topic, Payload]),
-    {noreply, State}.
+	spawn_or_forward(Topic, Payload, State).
 
 terminate(_Reason, #state{conn_pid = Pid}) ->
     if is_pid(Pid) -> emqtt:disconnect(Pid);
@@ -83,21 +82,21 @@ terminate(_Reason, #state{conn_pid = Pid}) ->
 
 %% Internal helpers
 
-% spawn_or_forward(Topic, Payload, State=#state{subscribers = Subs}) ->
-%     case maps:find(Topic, Subs) of
-%         {ok, Pid} when is_pid(Pid) ->
-%             % forward payload to existing worker
-%             Pid ! {mqtt, Payload},
-%             {noreply, State};
-%         error ->
-%             % start a new per-topic worker, register it in the map, and forward payload
-%             case service_subscriber_worker:start_link(Topic) of
-%                 {ok, Pid2} ->
-%                     NewSubs = maps:put(Topic, Pid2, Subs),
-%                     Pid2 ! {mqtt, Payload},
-%                     {noreply, State#state{subscribers = NewSubs}};
-%                 {error, Reason} ->
-%                     io:format("Failed to start worker for ~p: ~p~n", [Topic, Reason]),
-%                     {noreply, State}
-%             end
-%     end.
+spawn_or_forward(Topic, Payload, State=#state{subscribers = Subs}) ->
+    case maps:find(Topic, Subs) of
+        {ok, Pid} when is_pid(Pid) ->
+            % forward payload to existing worker
+			gen_server:cast(Pid, Payload),
+            {noreply, State};
+        error ->
+            % start a new per-topic worker, register it in the map, and forward payload
+            case service_subscriber_worker:start_link() of
+                {ok, NewPid} ->
+                    NewSubs = maps:put(Topic, NewPid, Subs),
+					gen_server:cast(NewPid, Payload),
+                    {noreply, State#state{subscribers = NewSubs}};
+                {error, Reason} ->
+                    io:format("Failed to start worker for ~p: ~p~n", [Topic, Reason]),
+                    {noreply, State}
+            end
+    end.
