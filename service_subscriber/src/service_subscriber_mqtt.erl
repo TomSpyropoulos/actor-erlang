@@ -7,6 +7,11 @@
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+%% @doc The state of the subscriber MQTT handler.
+%% `conn_opts`: Options used to connect to the MQTT broker.
+%% `conn_pid`: The PID of the emqtt client.
+%% `topic`: The wildcard topic this subscriber is listening to.
+%% `subscribers`: A map of topic strings to the PIDs of worker actors.
 -record(state, {
 	conn_opts:: [{atom(), term()}],
 	conn_pid :: pid() | undefined,
@@ -16,32 +21,40 @@
 
 %% --- API Functions ---
 
+%% @doc Starts the MQTT subscriber server.
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
+%% @doc Manually register a subscriber PID for a specific topic.
 subscribe(Topic, Pid) ->
     gen_server:call(?MODULE, {subscribe, Topic, Pid}).
 
+%% @doc Manually unregister a subscriber PID for a specific topic.
 unsubscribe(Topic, Pid) ->
     gen_server:call(?MODULE, {unsubscribe, Topic, Pid}).
 
 %% --- gen_server Callbacks ---
 
+%% @private
+%% @doc Initializes the server state and triggers connection.
 init([]) ->
-	io:format("MQTT worker started~n"),
+	io:format("MQTT Subscriber Started~n"),
 	self() ! connect,
     {ok, #state{
 		conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, <<"erlang_subscriber">>}],
         subscribers = #{}
     }}.
 
+%% @private
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+%% @private
 handle_call({subscribe, Topic, Pid}, _From, State=#state{subscribers = Subs}) ->
     NewSubs = maps:put(Topic, Pid, Subs),
     {reply, ok, State#state{subscribers = NewSubs}};
 
+%% @private
 handle_call({unsubscribe, Topic, Pid}, _From, State=#state{subscribers = Subs}) ->
     case maps:find(Topic, Subs) of
         {ok, ExistingPid} when ExistingPid =:= Pid ->
@@ -51,10 +64,12 @@ handle_call({unsubscribe, Topic, Pid}, _From, State=#state{subscribers = Subs}) 
             {reply, ok, State}
     end;
 
+%% @private
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
-%% Handle connect message: connect to broker and subscribe to wildcard topic
+%% @private
+%% @doc Handles the 'connect' message to establish connection and subscribe to topics.
 handle_info(connect, #state{conn_opts = Opts} = State) ->
     % start and connect client
     {ok, Pid} = emqtt:start_link(Opts),
@@ -70,10 +85,13 @@ handle_info(connect, #state{conn_opts = Opts} = State) ->
         topic = Topic
     }};
 
-%% Handle incoming publish messages - support a few common shapes
+%% @private
+%% @doc Handle incoming publish messages from the MQTT broker.
 handle_info({publish, #{topic := Topic, payload := Payload}}, State) when is_binary(Topic) ->
 	spawn_or_forward(Topic, Payload, State).
 
+%% @private
+%% @doc Disconnects from MQTT on termination.
 terminate(_Reason, #state{conn_pid = Pid}) ->
     if is_pid(Pid) -> emqtt:disconnect(Pid);
        true -> ok
@@ -82,6 +100,8 @@ terminate(_Reason, #state{conn_pid = Pid}) ->
 
 %% Internal helpers
 
+%% @private
+%% @doc Forwards a payload to an existing worker actor or spawns a new one if necessary.
 spawn_or_forward(Topic, Payload, State=#state{subscribers = Subs}) ->
     case maps:find(Topic, Subs) of
         {ok, Pid} when is_pid(Pid) ->

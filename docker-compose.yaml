@@ -1,15 +1,17 @@
 services:
+  # MQTT Broker: The central message hub for the IoT pipeline.
   mosquitto:
     image: eclipse-mosquitto:latest
     container_name: mosquitto
     ports:
-      - "1883:1883"
-      - "9001:9001"
+      - "1883:1883" # Standard MQTT port
+      - "9001:9001" # MQTT over WebSockets
     volumes:
       - ./mosquitto/config:/mosquitto/config
       - ./mosquitto/log:/mosquitto/log
       - mosquitto-storage:/mosquitto/data
     healthcheck:
+      # Use mosquitto_sub to verify the broker is responsive
       test:
         [
           "CMD",
@@ -29,6 +31,7 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # cAdvisor: Collects resource usage and performance characteristics from running containers.
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:latest
     container_name: monitoring_cadvisor
@@ -41,6 +44,7 @@ services:
     expose:
       - 8080
 
+  # Node Exporter: Exports hardware and OS metrics from the host machine.
   node-exporter:
     image: prom/node-exporter:latest
     container_name: monitoring_node_exporter
@@ -48,6 +52,7 @@ services:
     expose:
       - 9100
 
+  # Prometheus: Time-series database that scrapes and stores metrics from cAdvisor and Node Exporter.
   prometheus:
     image: prom/prometheus:latest
     container_name: monitoring_prometheus
@@ -63,6 +68,7 @@ services:
     ports:
       - "9090:9090"
 
+  # Grafana: Data visualization tool for creating dashboards based on Prometheus metrics.
   grafana:
     image: grafana/grafana:latest
     container_name: monitoring_grafana
@@ -76,12 +82,14 @@ services:
       - ./grafana/example/:/var/lib/grafana/dashboards
       - grafana-storage:/var/lib/grafana
 
+  # Service Publisher: Simulates IoT devices sending data. Can be scaled using --scale publisher=N.
   publisher:
     build: ./service_publisher
     restart: unless-stopped
     depends_on:
       - mosquitto
 
+  # Service Subscriber: Consumes and processes sensor data.
   subscriber:
     build: ./service_subscriber
     container_name: subscriber

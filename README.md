@@ -1,18 +1,67 @@
-# Actor Erlang: Containarized IoT Data Pipeline
+# IoT Data Pipeline (Erlang/OTP)
 
-This project consists of a containarized data pipeline which uses docker compose do setup a data pipeline using an actor for each "sensor".
-The subscriber subscribes to the wildcard topic sensor, and for each different topic (sensor) in the wildcard, it produces a new actor that keeps the last state of the sensor that was written on the queue.
+A high-performance, containerized IoT data pipeline implemented using **Erlang/OTP** and **GenServers**. This project demonstrates how to build a scalable messaging system that handles real-time sensor data using the actor model's lightweight processes and fault-tolerant principles.
 
-## Usage
-Run:
+## 🏗️ System Architecture
+
+The system consists of the following components:
+
+1.  **Service Publisher**: An Erlang application that simulates IoT sensors. Each instance generates sensor readings (JSON) and publishes them to an MQTT broker.
+2.  **Mosquitto MQTT Broker**: Acts as the central messaging hub, facilitating communication between publishers and subscribers.
+3.  **Service Subscriber**: An Erlang application that consumes messages from the `sensors/#` wildcard topic. It dynamically creates a dedicated **Worker Actor** (GenServer) for each unique sensor topic to maintain state (running sum and last timestamp).
+4.  **Prometheus**: Scrapes metrics from the containers and the host system.
+5.  **Grafana**: Provides a visual dashboard for monitoring container resource usage (CPU/RAM).
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/)
+- [Docker Compose](https://docs.docker.com/compose/install/)
+
+### Running the Pipeline
+
+To start the entire stack with 3 simulated sensors (publisher instances):
+
 ```bash 
 docker compose up -d --build --scale publisher=3
 ```
-to run the service with 3 simulated sensors.
 
-Grafana is accessible at `localhost:3000` and is preprovisioned with Prometheus as a data source and an example dashboard containing CPU and RAM usage of each container
+### Monitoring & Logs
 
-To see the latest timestamp for each sensor and the total sum of the published messages run:
-```bash
-docker logs subscriber
-```
+- **Grafana**: Accessible at [http://localhost:3000](http://localhost:3000). 
+    - *Credentials*: `admin` / `admin` (default).
+    - Pre-provisioned with Prometheus and a "Container Monitoring" dashboard.
+- **Subscriber Logs**: View the aggregated state for each sensor:
+    ```bash
+    docker logs -f subscriber
+    ```
+
+## 🧠 Deep Dive: Erlang Concurrency
+
+### Lightweight Processes vs. OS Threads
+
+The project leverages Erlang's unique concurrency model, which is built on **Lightweight Processes** rather than OS threads.
+
+#### Erlang Processes
+Unlike OS threads, Erlang processes are managed by the Erlang Runtime System (ERTS).
+- **Lightweight**: Each process starts with only a few kilobytes of memory, allowing for millions of concurrent processes.
+- **Preemptive**: The Erlang Scheduler ensures that no single process can hog the CPU, providing fair distribution of execution time.
+- **Pros**: Extremely efficient for massive concurrency and fault-tolerant systems.
+- **Cons**: Requires a different mental model (message passing) compared to shared-state concurrency.
+
+#### Fault Tolerance (Let It Crash)
+Erlang's "Let It Crash" philosophy is implemented through supervisors and process monitoring.
+- **Behavior**: Instead of defensive programming with complex try-catch blocks, Erlang encourages failing fast and allowing a supervisor to restart the process to a known good state.
+- **Advantage**: Creates highly resilient systems where localized failures do not bring down the entire application.
+
+The current implementation uses **GenServers** to encapsulate state and logic, managed by a supervisor tree defined in `service_subscriber_sup.erl`.
+
+## 🛠️ Tech Stack
+
+- **Language**: Erlang/OTP
+- **Concurrency**: GenServers & Lightweight Processes
+- **Messaging**: MQTT (via emqtt)
+- **JSON**: jsx
+- **Observability**: Prometheus & Grafana
+- **Deployment**: Docker & Docker Compose
