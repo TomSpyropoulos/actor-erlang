@@ -1,21 +1,21 @@
-# my global config
+# Global Prometheus configuration
 global:
-  scrape_interval: 5s # By default, scrape targets every 15 seconds.
-  evaluation_interval: 5s # By default, scrape targets every 15 seconds.
-  # scrape_timeout is set to the global default (10s).
-  # Attach these labels to any time series or alerts when communicating with
-  # external systems (federation, remote storage, Alertmanager).
+  scrape_interval: 5s     # Frequency at which to scrape targets
+  evaluation_interval: 5s # Frequency at which to evaluate rules
+  
+  # Global labels to identify this instance of Prometheus
   external_labels:
-    monitor: "my-project"
+    monitor: "iot-data-pipeline"
 
-# A scrape configuration containing exactly one endpoint to scrape:
-# Here it's Prometheus itself.
+# Scrape configurations: Define where Prometheus pulls data from
 scrape_configs:
-  # The job name is added as a label job=<job_name> to any timeseries scraped from this config.
+  # Monitor Prometheus itself
   - job_name: "prometheus"
-    # Override the global default and scrape targets from this job every 5 seconds.
     scrape_interval: 5s
-    # metrics_path defaults to '/metrics'
-    # scheme defaults to 'http'.
     static_configs:
-      - targets: ["localhost:9090", "cadvisor:8080", "node-exporter:9100"]
+      - targets: ["localhost:9090"]
+
+  # Monitor Docker containers via cAdvisor and host metrics via Node Exporter
+  - job_name: "container-and-host"
+    static_configs:
+      - targets: ["cadvisor:8080", "node-exporter:9100"]
