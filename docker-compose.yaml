@@ -108,7 +108,8 @@ services:
     build: ./service_publisher
     restart: unless-stopped
     depends_on:
-      - mosquitto
+      mosquitto:
+        condition: service_healthy
 
   # Service Subscriber: Consumes and processes sensor data.
   subscriber:
@@ -116,9 +117,13 @@ services:
     container_name: subscriber
     restart: unless-stopped
     depends_on:
-      - mosquitto
+      mosquitto:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
 
 volumes:
   mosquitto-storage: {}
   prometheus-storage: {}
   grafana-storage: {}
+  timescaledb-storage: {}
