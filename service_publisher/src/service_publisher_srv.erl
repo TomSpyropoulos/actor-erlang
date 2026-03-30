@@ -88,9 +88,9 @@ handle_info(publish_tick,
     % Generate random sensor data
 	RandomValue = integer_to_binary(rand:uniform(10)),
 	Timestamp = calendar:system_time_to_rfc3339(erlang:system_time(millisecond), [{unit, millisecond}, {offset, "Z"}]),
-	
+	TimestampBinary = list_to_binary(Timestamp),
 	% Build a JSON payload
-	JsonMap = #{<<"device_name">> => SensorBin, <<"timestamp">> => Timestamp, <<"value">> => RandomValue},
+	JsonMap = #{<<"device_name">> => SensorBin, <<"timestamp">> => TimestampBinary, <<"value">> => RandomValue},
 	Json = json:encode(JsonMap),
     
     % Publish to MQTT
