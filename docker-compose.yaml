@@ -82,6 +82,27 @@ services:
       - ./grafana/example/:/var/lib/grafana/dashboards
       - grafana-storage:/var/lib/grafana
 
+  # TimescaleDB: a pgsql extension for speeding up timeseries data
+  timescaledb:
+    image: timescale/timescaledb-ha:pg18.1-ts2.25.1
+    container_name: timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: epu
+    volumes:
+      - timescaledb-storage:/var/lib/postgresql/data
+      - ./timescaledb/init/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
   # Service Publisher: Simulates IoT devices sending data. Can be scaled using --scale publisher=N.
   publisher:
     build: ./service_publisher
