@@ -6,11 +6,19 @@ A high-performance, containerized IoT data pipeline implemented using **Erlang/O
 
 The system consists of the following components:
 
-1.  **Service Publisher**: An Erlang application that simulates IoT sensors. Each instance generates sensor readings (JSON) and publishes them to an MQTT broker.
+1.  **Service Publisher**: An Erlang application that simulates IoT sensors. Each instance generates sensor readings (JSON) and publishes them to an MQTT broker. See [publisher.md](publisher.md) for more details.
 2.  **Mosquitto MQTT Broker**: Acts as the central messaging hub, facilitating communication between publishers and subscribers.
-3.  **Service Subscriber**: An Erlang application that consumes messages from the `sensors/#` wildcard topic. It dynamically creates a dedicated **Worker Actor** (GenServer) for each unique sensor topic to maintain state (running sum and last timestamp).
+3.  **Service Subscriber**: An Erlang application that consumes messages from the `sensors/#` wildcard topic. It dynamically creates a dedicated **Worker Actor** (GenServer) for each unique sensor topic to maintain state (running sum and last timestamp). See [subscriber.md](subscriber.md) for more details.
 4.  **Prometheus**: Scrapes metrics from the containers and the host system.
-5.  **Grafana**: Provides a visual dashboard for monitoring container resource usage (CPU/RAM).
+5.  **Grafana**: Provides a visual dashboard for monitoring container resource usage (CPU/RAM) and application latency.
+
+## ✨ Recent Changes
+
+*   **Latency Metrics Update:** Switched the latency tracking from a standard `Histogram` to a `Quantile Summary` using `prometheus_quantile_summary` from `prometheus.erl`.
+*   **Accurate Quantiles:** The Prometheus client now natively tracks and reports accurate P50, P95, P99, and P999 quantiles directly instead of relying on server-side `histogram_quantile` estimations.
+*   **Native Time Unit Fix:** Fixed a bug where latency values were unnaturally small by correctly converting the latency to Erlang's *native time unit*. The `prometheus.erl` client expects native time when a metric name ends in a time unit suffix (e.g., `_milliseconds`), automatically handling the final conversion.
+*   **Dashboard Updates:** The Grafana container monitoring dashboard was updated to display the direct quantile outputs instead of the legacy bucket-based histogram queries.
+*   **Documentation:** Added detailed documentation about the roles of the `publisher` and `subscriber` services.
 
 ## 🚀 Getting Started
 
@@ -23,7 +31,7 @@ The system consists of the following components:
 
 To start the entire stack with 3 simulated sensors (publisher instances):
 
-```bash 
+```bash
 docker compose up -d --build --scale publisher=3
 ```
 
@@ -64,4 +72,5 @@ The current implementation uses **GenServers** to encapsulate state and logic, m
 - **Messaging**: MQTT (via emqtt)
 - **JSON**: jsx
 - **Observability**: Prometheus & Grafana
+- **Database**: TimescaleDB
 - **Deployment**: Docker & Docker Compose

@@ -53,6 +53,31 @@ handle_cast(Msg, #state{sum = Sum, db_pid = DB} = State) ->
     % Insert into TimescaleDB
     % Table: Data (DeviceName TEXT, Value INTEGER, Timestamp TIMESTAMPTZ)
     epgsql:equery(DB, "INSERT INTO Data (DeviceName, Value, Timestamp) VALUES ($1, $2, $3)", [DeviceName, Value, ErlTimestamp]),
+
+    %% --- Prometheus Metrics Recording ---
+    %% We need to calculate the end-to-end latency of the message.
+    %% This is done by comparing the timestamp embedded in the JSON payload (created by the publisher)
+    %% with the current system time.
+    %%
+    %% 1. `os:system_time(microsecond)` gives us the current time in microseconds.
+    %% 2. `ST` is the payload timestamp, already parsed into microseconds earlier in this function.
+    Now = os:system_time(microsecond),
+    RawLatencyUs = Now - ST,
+
+    %% 3. Clock drift between the publisher and subscriber containers could potentially 
+    %%    result in a negative latency. We cap the minimum latency at 0 microseconds.
+    LatencyUs = max(0, RawLatencyUs),
+
+    %% 4. The Erlang Prometheus client (`prometheus.erl`) has a built-in time unit conversion feature.
+    %%    If a metric's name ends in a duration unit (like `_milliseconds` or `_seconds`), 
+    %%    the library expects the observed value to be in Erlang's *native* time unit, 
+    %%    and it automatically converts it to the requested suffix unit before reporting.
+    %%    Therefore, we must convert our microsecond value into native time units here.
+    NativeLatency = erlang:convert_time_unit(LatencyUs, microsecond, native),
+    
+    %% Increment the total request counter and observe the latency for our quantile summary.
+    service_subscriber_metrics:inc_requests(),
+    service_subscriber_metrics:observe_latency(NativeLatency),
 	
 	% Calculate the new total sum
 	TotalSum = case Sum of undefined -> Value; _ -> Value + Sum end,

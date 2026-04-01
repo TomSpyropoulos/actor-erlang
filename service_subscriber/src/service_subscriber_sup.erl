@@ -23,6 +23,12 @@ init([]) ->
     
     % The MQTT subscriber server listens for messages and spawns worker actors
     ChildSpecs = [
+        #{id => service_subscriber_metrics,
+          start => {service_subscriber_metrics, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [service_subscriber_metrics]},
         #{id => service_subscriber_mqtt,
           start => {service_subscriber_mqtt, start_link, []},
           restart => permanent,

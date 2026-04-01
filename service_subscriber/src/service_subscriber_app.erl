@@ -7,6 +7,8 @@
 %% @private
 start(_Type, _Args) ->
 	io:format("Subscriber App Started~n"),
+    % Start Prometheus metrics server on default port 8081
+    prometheus_httpd:start(),
     service_subscriber_sup:start_link().
 
 %% @private

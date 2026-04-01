@@ -1,8 +1,8 @@
 # Global Prometheus configuration
 global:
-  scrape_interval: 5s     # Frequency at which to scrape targets
-  evaluation_interval: 5s # Frequency at which to evaluate rules
-  
+  scrape_interval: 2s # Frequency at which to scrape targets
+  evaluation_interval: 2s # Frequency at which to evaluate rules
+
   # Global labels to identify this instance of Prometheus
   external_labels:
     monitor: "iot-data-pipeline"
@@ -11,7 +11,7 @@ global:
 scrape_configs:
   # Monitor Prometheus itself
   - job_name: "prometheus"
-    scrape_interval: 5s
+    scrape_interval: 2s
     static_configs:
       - targets: ["localhost:9090"]
 
@@ -19,3 +19,8 @@ scrape_configs:
   - job_name: "container-and-host"
     static_configs:
       - targets: ["cadvisor:8080", "node-exporter:9100"]
+
+  # Monitor Service Subscriber
+  - job_name: "subscriber"
+    static_configs:
+      - targets: ["subscriber:8081"]
