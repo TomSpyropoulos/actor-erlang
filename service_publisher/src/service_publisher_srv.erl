@@ -41,7 +41,7 @@ init([]) ->
 	self() ! connect, 
     {ok, #state{
 		conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, <<"erlang_service">>}],
-		interval = 100 % Interval in ms, at which a message will be published
+		interval = 1 % Interval in ms, at which a message will be published
     }}.
 
 %% @private
