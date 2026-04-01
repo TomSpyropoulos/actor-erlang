@@ -61,7 +61,7 @@ The current implementation uses **GenServers** to encapsulate state and logic, m
 
 - **Language**: Erlang/OTP
 - **Concurrency**: GenServers & Lightweight Processes
-- **Messaging**: MQTT (via emqtt)
+- **Messaging**: MQTT (Mosquitto/via emqtt)
 - **JSON**: Built-in json (OTP 27+)
 - **Observability**: Prometheus & Grafana
 - **Database**: TimescaleDB
