@@ -77,6 +77,9 @@ services:
       - 3000
     ports:
       - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
     volumes:
       - ./grafana/provisioning/:/etc/grafana/provisioning
       - ./grafana/example/:/var/lib/grafana/dashboards

@@ -29,8 +29,7 @@ docker compose up -d --build --scale publisher=3
 
 ### Monitoring & Logs
 
-- **Grafana**: Accessible at [http://localhost:3000](http://localhost:3000). 
-    - *Credentials*: `admin` / `admin` (default).
+- **Grafana**: Accessible at [http://localhost:3000](http://localhost:3000) without authentication.
     - Pre-provisioned with Prometheus and a "Container Monitoring" dashboard.
 - **Subscriber Logs**: View the aggregated state for each sensor:
     ```bash
