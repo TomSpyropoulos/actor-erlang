@@ -1,7 +1,7 @@
 -module(service_subscriber_db).
 -behaviour(gen_server).
 
--export([start_link/0, insert/3]).
+-export([start_link/0, insert/3, insert_status/2]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -15,6 +15,9 @@ start_link() ->
 insert(DeviceName, Value, ErlTimestamp) ->
     gen_server:call(?MODULE, {insert, DeviceName, Value, ErlTimestamp}).
 
+insert_status(DeviceName, Status) ->
+    gen_server:call(?MODULE, {insert_status, DeviceName, Status}).
+
 init([]) ->
     {ok, DB} = epgsql:connect("timescaledb", "postgres", "postgres", #{
         database => "epu",
@@ -26,6 +29,11 @@ init([]) ->
 handle_call({insert, DeviceName, Value, ErlTimestamp}, _From, #state{db_pid = DB} = State) ->
     epgsql:equery(DB, "INSERT INTO Data (DeviceName, Value, Timestamp) VALUES ($1, $2, $3)",
                   [DeviceName, Value, ErlTimestamp]),
+    {reply, ok, State};
+
+handle_call({insert_status, DeviceName, Status}, _From, #state{db_pid = DB} = State) ->
+    epgsql:equery(DB, "INSERT INTO sensor_status (DeviceName, Status) VALUES ($1, $2)",
+                  [DeviceName, Status]),
     {reply, ok, State};
 
 handle_call(_Req, _From, State) ->

@@ -2,42 +2,46 @@
 -behaviour(gen_server).
 
 %% public API
--export([start_link/0]).
+-export([start_link/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 %% @doc The state of a sensor worker actor.
+%% `topic`: The MQTT topic this worker is handling.
 %% `sum`: The running sum of all sensor values received.
-%% `lastTimestamp`: The timestamp of the last received message.
+%% `lastSeen`: Unix timestamp (seconds) when the last message was received locally.
+%% `lastStatus`: The last reported status ('ALIVE' or 'MISSING').
 -record(state, {
-	sum :: integer() | undefined,
-	lastTimestamp :: binary() | undefined
+	topic           :: binary(),
+	sum             :: integer() | undefined,
+	lastSeen        :: integer() | undefined,
+	lastStatus      :: binary() | undefined
 }).
 
 %% --- API Functions ---
 
 %% @doc Starts a new worker for a specific sensor topic.
-start_link() ->
-    gen_server:start_link(?MODULE, [], []).
+start_link(Topic) ->
+    gen_server:start_link(?MODULE, [Topic], []).
 
 
 %% --- gen_server Callbacks ---
 
 %% @private
-init([]) ->
-	{ok, #state{}}.
+init([Topic]) ->
+	{ok, #state{topic = Topic}}.
 
 %% @private
 %% @doc Handles incoming sensor data (as JSON) forwarded from the MQTT subscriber.
 %% Updates the internal state with the new value and timestamp.
-handle_cast(Msg, #state{sum = Sum} = State) ->
+handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
 	% Decode the JSON payload
 	#{} = Data = json:decode(Msg),
 	<<_/binary>> = DeviceName = maps:get(<<"device_name">>, Data),
 	<<_/binary>> = Timestamp = maps:get(<<"timestamp">>, Data),
 	<<_/binary>> = BinaryValue = maps:get(<<"value">>, Data),
-	
+
     % Convert the value to an integer for calculation
 	Value = binary_to_integer(BinaryValue),
 
@@ -63,30 +67,27 @@ handle_cast(Msg, #state{sum = Sum} = State) ->
     Now = os:system_time(microsecond),
     RawLatencyUs = Now - ST,
 
-    %% 3. Clock drift between the publisher and subscriber containers could potentially 
+    %% 3. Clock drift between the publisher and subscriber containers could potentially
     %%    result in a negative latency. We cap the minimum latency at 0 microseconds.
     LatencyUs = max(0, RawLatencyUs),
 
     %% 4. The Erlang Prometheus client (`prometheus.erl`) has a built-in time unit conversion feature.
-    %%    If a metric's name ends in a duration unit (like `_milliseconds` or `_seconds`), 
-    %%    the library expects the observed value to be in Erlang's *native* time unit, 
+    %%    If a metric's name ends in a duration unit (like `_milliseconds` or `_seconds`),
+    %%    the library expects the observed value to be in Erlang's *native* time unit,
     %%    and it automatically converts it to the requested suffix unit before reporting.
     %%    Therefore, we must convert our microsecond value into native time units here.
     NativeLatency = erlang:convert_time_unit(LatencyUs, microsecond, native),
-    
+
     %% Increment the total request counter and observe the latency for our quantile summary.
     service_subscriber_metrics:inc_requests(),
     service_subscriber_metrics:observe_latency(NativeLatency),
-	
+
 	% Calculate the new total sum
 	TotalSum = case Sum of undefined -> Value; _ -> Value + Sum end,
-	
-    io:format("[Worker ~p] Received message. Sensor: ~s, Sum: ~p, Last Timestamp: ~s~n",
-			  [self(), DeviceName, TotalSum, Timestamp]),
-    
+
     {noreply, State#state{
 				 sum = TotalSum,
-				 lastTimestamp = Timestamp
+				 lastSeen = os:system_time(second)
 				}}.
 
 %% @private
@@ -94,8 +95,40 @@ handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
 %% @private
+handle_info(heartbeat, #state{topic = Topic, lastSeen = LastSeen, lastStatus = LastStatus} = State) ->
+    DeviceName = extract_device_name(Topic),
+    Now = os:system_time(second),
+
+    {NewStatus, ShouldInsert} = case LastSeen of
+        undefined ->
+            {<<"MISSING">>, LastStatus =/= <<"MISSING">>};
+        _ ->
+            Diff = Now - LastSeen,
+            Status = case Diff > 1 of true -> <<"MISSING">>; false -> <<"ALIVE">> end,
+            {Status, Status =/= LastStatus}
+    end,
+
+    case ShouldInsert of
+        true ->
+            io:format("[Worker ~p] Sensor ~s is now ~s~n", [self(), DeviceName, NewStatus]),
+            service_subscriber_db:insert_status(DeviceName, NewStatus);
+        false ->
+            ok
+    end,
+
+    {noreply, State#state{lastStatus = NewStatus}};
+
+%% @private
 handle_info(_Info, State) ->
     {noreply, State}.
+
+%% --- Internal helpers ---
+
+extract_device_name(Topic) ->
+    case binary:split(Topic, <<"/">>) of
+        [_, Name] -> Name;
+        [Name]    -> Name
+    end.
 
 %% @private
 terminate(_Reason, #state{}) ->

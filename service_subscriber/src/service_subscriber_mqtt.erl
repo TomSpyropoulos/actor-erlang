@@ -40,6 +40,7 @@ unsubscribe(Topic, Pid) ->
 init([]) ->
 	io:format("MQTT Subscriber Started~n"),
 	self() ! connect_mqtt,
+	timer:send_interval(5000, send_heartbeat),
     {ok, #state{
 		conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, <<"erlang_subscriber">>}],
         subscribers = #{}
@@ -70,6 +71,7 @@ handle_call(_Req, _From, State) ->
 
 %% @private
 %% @doc Handles the 'connect' message to establish connection and subscribe to topics.
+%% Also handles the 'send_heartbeat' message to broadcast heartbeats to all workers.
 handle_info(connect_mqtt, #state{conn_opts = Opts} = State) ->
     % start and connect client
     {ok, Pid} = emqtt:start_link(Opts),
@@ -77,12 +79,16 @@ handle_info(connect_mqtt, #state{conn_opts = Opts} = State) ->
     _ = (catch emqtt:connect(Pid)),
     Topic = <<"sensors/#">>,
 
-    _ = (catch emqtt:subscribe(Pid, Topic)),
+    _ = (catch emqtt:subscribe(Pid, {Topic, 0})),
     io:format("Subscribed to ~p~n", [Topic]),
     {noreply, State#state{
         conn_pid = Pid,
         topic = Topic
     }};
+
+handle_info(send_heartbeat, State = #state{subscribers = Subs}) ->
+    maps:foreach(fun(_Topic, Pid) -> Pid ! heartbeat end, Subs),
+    {noreply, State};
 
 %% @private
 %% @doc Handle incoming publish messages from the MQTT broker.
@@ -108,7 +114,7 @@ spawn_or_forward(Topic, Payload, State=#state{subscribers = Subs}) ->
             gen_server:cast(Pid, Payload),
             {noreply, State};
         error ->
-            case service_subscriber_worker:start_link() of
+            case service_subscriber_worker:start_link(Topic) of
                 {ok, NewPid} ->
                     NewSubs = maps:put(Topic, NewPid, Subs),
                     gen_server:cast(NewPid, Payload),

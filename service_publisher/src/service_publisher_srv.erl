@@ -38,9 +38,9 @@ publish(Topic, Payload) ->
 init([]) ->
 	% initialize worker
 	io:format("Publisher Worker Started~n"),
-	self() ! connect, 
+	self() ! connect,
     {ok, #state{
-		conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, <<"erlang_service">>}],
+		conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, client_id_from_hostname()}],
 		interval = 1 % Interval in ms, at which a message will be published
     }}.
 
@@ -95,7 +95,7 @@ handle_info(publish_tick,
     
     % Publish to MQTT
     emqtt:publish(Pid, Topic, Json, 0),
-	io:format("Published message from ~s: ~s~n", [SensorBin, Json]),
+	% io:format("Published message from ~s: ~s~n", [SensorBin, Json]),
     
     % Schedule the next tick
     erlang:send_after(Interval, self(), publish_tick),
@@ -104,6 +104,14 @@ handle_info(publish_tick,
 %% @private
 handle_info(_Info, State) ->
     {noreply, State}.
+
+%% --- Internal helpers ---
+
+client_id_from_hostname() ->
+    OsHostname = case os:getenv("HOSTNAME") of
+        false -> <<"erlang_service">>;
+        H      -> iolist_to_binary(["erlang_service_", H])
+    end.
 
 %% @private
 %% @doc Disconnects from MQTT broker on termination.
