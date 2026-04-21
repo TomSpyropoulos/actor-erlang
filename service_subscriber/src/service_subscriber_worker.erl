@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 
 %% public API
--export([start_link/1]).
+-export([start_link/0]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -12,27 +12,26 @@
 %% `lastTimestamp`: The timestamp of the last received message.
 -record(state, {
 	sum :: integer() | undefined,
-	lastTimestamp :: binary() | undefined,
-    db_pid :: pid()
+	lastTimestamp :: binary() | undefined
 }).
 
 %% --- API Functions ---
 
 %% @doc Starts a new worker for a specific sensor topic.
-start_link(DB) ->
-    gen_server:start_link(?MODULE, [DB], []).
+start_link() ->
+    gen_server:start_link(?MODULE, [], []).
 
 
 %% --- gen_server Callbacks ---
 
 %% @private
-init([DB]) ->
-	{ok, #state{db_pid = DB}}.
+init([]) ->
+	{ok, #state{}}.
 
 %% @private
 %% @doc Handles incoming sensor data (as JSON) forwarded from the MQTT subscriber.
 %% Updates the internal state with the new value and timestamp.
-handle_cast(Msg, #state{sum = Sum, db_pid = DB} = State) ->
+handle_cast(Msg, #state{sum = Sum} = State) ->
 	% Decode the JSON payload
 	#{} = Data = json:decode(Msg),
 	<<_/binary>> = DeviceName = maps:get(<<"device_name">>, Data),
@@ -52,7 +51,7 @@ handle_cast(Msg, #state{sum = Sum, db_pid = DB} = State) ->
 
     % Insert into TimescaleDB
     % Table: Data (DeviceName TEXT, Value INTEGER, Timestamp TIMESTAMPTZ)
-    epgsql:equery(DB, "INSERT INTO Data (DeviceName, Value, Timestamp) VALUES ($1, $2, $3)", [DeviceName, Value, ErlTimestamp]),
+    service_subscriber_db:insert(DeviceName, Value, ErlTimestamp),
 
     %% --- Prometheus Metrics Recording ---
     %% We need to calculate the end-to-end latency of the message.

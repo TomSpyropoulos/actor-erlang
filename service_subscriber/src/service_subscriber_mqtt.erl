@@ -15,7 +15,6 @@
 -record(state, {
 	conn_opts:: [{atom(), term()}],
 	conn_pid :: pid() | undefined,
-    db_pid   :: pid() | undefined,
     topic    :: binary() | undefined,
     subscribers :: map()  % maps TopicBinary -> Pid
 }).
@@ -40,7 +39,7 @@ unsubscribe(Topic, Pid) ->
 %% @doc Initializes the server state and triggers connection.
 init([]) ->
 	io:format("MQTT Subscriber Started~n"),
-	self() ! connect_db,
+	self() ! connect_mqtt,
     {ok, #state{
 		conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, <<"erlang_subscriber">>}],
         subscribers = #{}
@@ -70,16 +69,6 @@ handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
 %% @private
-handle_info(connect_db, State) ->
-    {ok, DB} = epgsql:connect("timescaledb", "postgres", "postgres", #{
-        database => "epu",
-        timeout => 5000
-    }),
-    io:format("Connected to TimescaleDB~n"),
-    self() ! connect_mqtt,
-    {noreply, State#state{db_pid = DB}};
-
-%% @private
 %% @doc Handles the 'connect' message to establish connection and subscribe to topics.
 handle_info(connect_mqtt, #state{conn_opts = Opts} = State) ->
     % start and connect client
@@ -102,12 +91,10 @@ handle_info({publish, #{topic := Topic, payload := Payload}}, State) when is_bin
 
 %% @private
 %% @doc Disconnects from MQTT on termination.
-terminate(_Reason, #state{conn_pid = MqttPid, db_pid = DBPid}) ->
-    if is_pid(MqttPid) -> emqtt:disconnect(MqttPid);
-       true -> ok
-    end,
-    if is_pid(DBPid) -> epgsql:close(DBPid);
-       true -> ok
+terminate(_Reason, #state{conn_pid = MqttPid}) ->
+    case is_pid(MqttPid) of
+        true  -> emqtt:disconnect(MqttPid);
+        false -> ok
     end,
     ok.
 
@@ -115,18 +102,16 @@ terminate(_Reason, #state{conn_pid = MqttPid, db_pid = DBPid}) ->
 
 %% @private
 %% @doc Forwards a payload to an existing worker actor or spawns a new one if necessary.
-spawn_or_forward(Topic, Payload, State=#state{subscribers = Subs, db_pid = DB}) ->
+spawn_or_forward(Topic, Payload, State=#state{subscribers = Subs}) ->
     case maps:find(Topic, Subs) of
         {ok, Pid} when is_pid(Pid) ->
-            % forward payload to existing worker
-			gen_server:cast(Pid, Payload),
+            gen_server:cast(Pid, Payload),
             {noreply, State};
         error ->
-            % start a new per-topic worker, register it in the map, and forward payload
-            case service_subscriber_worker:start_link(DB) of
+            case service_subscriber_worker:start_link() of
                 {ok, NewPid} ->
                     NewSubs = maps:put(Topic, NewPid, Subs),
-					gen_server:cast(NewPid, Payload),
+                    gen_server:cast(NewPid, Payload),
                     {noreply, State#state{subscribers = NewSubs}};
                 {error, Reason} ->
                     io:format("Failed to start worker for ~p: ~p~n", [Topic, Reason]),
