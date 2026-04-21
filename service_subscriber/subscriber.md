@@ -30,3 +30,35 @@ The application is built around an OTP **Supervision Tree**:
 The Subscriber heavily utilizes Prometheus for observability. 
 
 One of the critical metrics tracked is the end-to-end latency. This is tracked using a `prometheus_quantile_summary`, which accurately calculates the P50, P95, P99, and P999 latency percentiles dynamically on the client-side. The library expects time measurements to be supplied in Erlang's native time unit (when the metric name ends in a time duration suffix like `_milliseconds`), automatically converting it to milliseconds for the Grafana dashboard.
+
+## 🔍 Missing Sensor Detection
+
+The Subscriber implements a heartbeat-based missing sensor detection system:
+
+- Every **5 seconds**, the MQTT client broadcasts a `heartbeat` message to all active worker actors.
+- Each worker compares its `lastSeen` timestamp (captured using the subscriber's local clock) against the current time.
+- If a sensor has not sent data within the last second, its status transitions to `MISSING`; otherwise it is `ALIVE`.
+- State changes are logged (`io:format`) and persisted to the `sensor_status` table in TimescaleDB, but only when the status actually changes to avoid unnecessary writes.
+
+## 📡 MQTT Quality of Service
+
+The subscriber connects with **QoS 0 (At Most Once)**. This provides fire-and-forget delivery with no acknowledgment overhead, prioritizing throughput and low latency over guaranteed delivery.
+
+## 📝 TODO / Known Bottlenecks
+
+The following architectural bottlenecks limit throughput and should be addressed in future iterations:
+
+1. **Single Synchronous DB Connection**
+   `service_subscriber_db` is a single `gen_server` owning one `epgsql` connection. All DB inserts are globally serialized through this one process, capping throughput at roughly 1–3k inserts/sec regardless of publisher count.
+
+2. **Workers Block on DB Calls**
+   Every `service_subscriber_worker` performs a synchronous `gen_server:call` to the DB server before handling the next message. Workers spend most of their time waiting in line rather than processing.
+
+3. **Single MQTT Message Handler**
+   `service_subscriber_mqtt` is a single `gen_server`. All inbound `{publish, ...}` messages from the `emqtt` client are delivered to this one PID, creating a mailbox queue under load before workers ever see the payload.
+
+4. **Expensive Timestamp Parsing**
+   For every message, the worker executes `calendar:rfc3339_to_system_time/2`, `calendar:system_time_to_universal_time/2`, and manual microsecond arithmetic. These are relatively slow Erlang-level operations that add up at high throughput.
+
+5. **Quantile Summary Metrics Overhead**
+   `prometheus_quantile_summary:observe/2` uses a streaming algorithm backed by ETS. Under high concurrency from many workers, it becomes a lock-contention point.
