@@ -24,7 +24,7 @@ The application is built around an OTP **Supervision Tree** optimized for massiv
 - **MQTT Client (`service_subscriber_mqtt`)**: A GenServer managing the connection to the Mosquitto broker. It performs extremely fast, lock-free lookups in a shared ETS routing table to route payloads. If a sensor topic is new, it delegates startup asynchronously to avoid blocking the main MQTT loop.
 - **Dynamic Worker Supervisor (`service_subscriber_worker_sup`)**: A supervisor managing the lifecycle of dynamically spawned sensor workers.
 - **Worker Actors (`service_subscriber_worker`)**: Dynamically spawned processes handling JSON decoding, database insert calls, and metrics reporting. They register themselves in the shared ETS table upon initialization.
-- **Database Connection Pool (`service_subscriber_db`)**: A pool of 5 parallel processes holding independent connections to TimescaleDB. Writes are dispatched asynchronously via `gen_server:cast` and routed using a hash of the `DeviceName` to guarantee chronological write order in the database for each sensor while running in parallel.
+- **Database Connection Pool (`service_subscriber_db`)**: A pool of 5 parallel processes holding independent connections to TimescaleDB. Writes are dispatched asynchronously via `gen_server:cast` to the pool using a hash of the `DeviceName` to guarantee chronological write order per sensor. The database workers then execute these writes in a **fully asynchronous, non-blocking manner using `epgsqla:prepared_query/3`** with SQL queries prepared once at startup. This enables query pipelining and guarantees that DB worker processes never block on database network socket I/O.
 - **Metrics Server (`service_subscriber_metrics`)**: A centralized service for declaring and exposing Prometheus metrics.
 
 ## 📊 Metrics Tracking
@@ -54,8 +54,8 @@ The architectural bottlenecks limiting subscriber performance have been addresse
 1. **[SOLVED] Single Synchronous DB Connection**
    `service_subscriber_db` is now structured as a connection pool of 5 parallel connections. All writes are beautifully load-balanced across the pool.
 
-2. **[SOLVED] Workers Block on DB Calls**
-   Database insertions are now asynchronous via `gen_server:cast`. Sensor worker mailboxes never block waiting for disk/network I/O from TimescaleDB, allowing them to instantly digest subsequent MQTT packets.
+2. **[SOLVED] Workers Block on DB Calls & DB Socket Blocking**
+   Database insertions are asynchronous via `gen_server:cast`, so sensor workers never block. Furthermore, the database pool processes themselves use the **`epgsqla` asynchronous driver API** with statements prepared once at startup. This ensures the database workers never block on network sockets or disk I/O, allowing them to pipeline thousands of queries concurrently in a true non-blocking "send-and-forget" manner.
 
 3. **[SOLVED] Single MQTT Message Handler Blocking**
    Lookups use a lock-free named ETS table (`service_subscriber_workers`) with `{read_concurrency, true}`. New dynamic topic spawns are delegated asynchronously to `service_subscriber_worker_sup` via a spawned task. The `service_subscriber_mqtt` gateway process never blocks for a single millisecond.
