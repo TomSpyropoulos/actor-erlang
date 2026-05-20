@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 
 %% public API
--export([start_link/0, subscribe/2, unsubscribe/2]).
+-export([start_link/0]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -11,12 +11,10 @@
 %% `conn_opts`: Options used to connect to the MQTT broker.
 %% `conn_pid`: The PID of the emqtt client.
 %% `topic`: The wildcard topic this subscriber is listening to.
-%% `subscribers`: A map of topic strings to the PIDs of worker actors.
 -record(state, {
 	conn_opts:: [{atom(), term()}],
 	conn_pid :: pid() | undefined,
-    topic    :: binary() | undefined,
-    subscribers :: map()  % maps TopicBinary -> Pid
+    topic    :: binary() | undefined
 }).
 
 %% --- API Functions ---
@@ -24,14 +22,6 @@
 %% @doc Starts the MQTT subscriber server.
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
-
-%% @doc Manually register a subscriber PID for a specific topic.
-subscribe(Topic, Pid) ->
-    gen_server:call(?MODULE, {subscribe, Topic, Pid}).
-
-%% @doc Manually unregister a subscriber PID for a specific topic.
-unsubscribe(Topic, Pid) ->
-    gen_server:call(?MODULE, {unsubscribe, Topic, Pid}).
 
 %% --- gen_server Callbacks ---
 
@@ -41,29 +31,15 @@ init([]) ->
 	io:format("MQTT Subscriber Started~n"),
 	self() ! connect_mqtt,
 	timer:send_interval(5000, send_heartbeat),
+    % Create a public ETS table for lock-free worker routing
+    ets:new(service_subscriber_workers, [set, public, named_table, {read_concurrency, true}]),
     {ok, #state{
-		conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, <<"erlang_subscriber">>}],
-        subscribers = #{}
+		conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, <<"erlang_subscriber">>}]
     }}.
 
 %% @private
 handle_cast(_Msg, State) ->
     {noreply, State}.
-
-%% @private
-handle_call({subscribe, Topic, Pid}, _From, State=#state{subscribers = Subs}) ->
-    NewSubs = maps:put(Topic, Pid, Subs),
-    {reply, ok, State#state{subscribers = NewSubs}};
-
-%% @private
-handle_call({unsubscribe, Topic, Pid}, _From, State=#state{subscribers = Subs}) ->
-    case maps:find(Topic, Subs) of
-        {ok, ExistingPid} when ExistingPid =:= Pid ->
-            NewSubs = maps:remove(Topic, Subs),
-            {reply, ok, State#state{subscribers = NewSubs}};
-        _ ->
-            {reply, ok, State}
-    end;
 
 %% @private
 handle_call(_Req, _From, State) ->
@@ -86,8 +62,11 @@ handle_info(connect_mqtt, #state{conn_opts = Opts} = State) ->
         topic = Topic
     }};
 
-handle_info(send_heartbeat, State = #state{subscribers = Subs}) ->
-    maps:foreach(fun(_Topic, Pid) -> Pid ! heartbeat end, Subs),
+handle_info(send_heartbeat, State) ->
+    ets:foldl(fun({_Topic, Pid}, Acc) ->
+                  Pid ! heartbeat,
+                  Acc
+              end, ok, service_subscriber_workers),
     {noreply, State};
 
 %% @private
@@ -108,19 +87,34 @@ terminate(_Reason, #state{conn_pid = MqttPid}) ->
 
 %% @private
 %% @doc Forwards a payload to an existing worker actor or spawns a new one if necessary.
-spawn_or_forward(Topic, Payload, State=#state{subscribers = Subs}) ->
-    case maps:find(Topic, Subs) of
-        {ok, Pid} when is_pid(Pid) ->
-            gen_server:cast(Pid, Payload),
-            {noreply, State};
-        error ->
-            case service_subscriber_worker:start_link(Topic) of
-                {ok, NewPid} ->
-                    NewSubs = maps:put(Topic, NewPid, Subs),
-                    gen_server:cast(NewPid, Payload),
-                    {noreply, State#state{subscribers = NewSubs}};
-                {error, Reason} ->
-                    io:format("Failed to start worker for ~p: ~p~n", [Topic, Reason]),
+spawn_or_forward(Topic, Payload, State) ->
+    case ets:lookup(service_subscriber_workers, Topic) of
+        [{Topic, Pid}] ->
+            case erlang:is_process_alive(Pid) of
+                true ->
+                    gen_server:cast(Pid, Payload),
+                    {noreply, State};
+                false ->
+                    ets:delete(service_subscriber_workers, Topic),
+                    spawn_and_forward(Topic, Payload),
                     {noreply, State}
-            end
+            end;
+        [] ->
+            spawn_and_forward(Topic, Payload),
+            {noreply, State}
     end.
+
+spawn_and_forward(Topic, Payload) ->
+    spawn(fun() ->
+        case service_subscriber_worker_sup:start_worker(Topic) of
+            {ok, Pid} ->
+                gen_server:cast(Pid, Payload);
+            {error, {already_started, Pid}} ->
+                ets:insert(service_subscriber_workers, {Topic, Pid}),
+                gen_server:cast(Pid, Payload);
+            {error, already_present} ->
+                {ok, Pid} = supervisor:restart_child(service_subscriber_worker_sup, Topic),
+                ets:insert(service_subscriber_workers, {Topic, Pid}),
+                gen_server:cast(Pid, Payload)
+        end
+    end).

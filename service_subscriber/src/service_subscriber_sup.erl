@@ -21,7 +21,16 @@ init([]) ->
         period => 5
     },
     
-    % The MQTT subscriber server listens for messages and spawns worker actors
+    DBWorkers = [
+        #{id => {service_subscriber_db, I},
+          start => {service_subscriber_db, start_link, [I]},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [service_subscriber_db]}
+        || I <- lists:seq(1, 5)
+    ],
+
     ChildSpecs = [
         #{id => service_subscriber_metrics,
           start => {service_subscriber_metrics, start_link, []},
@@ -29,12 +38,13 @@ init([]) ->
           shutdown => 5000,
           type => worker,
           modules => [service_subscriber_metrics]},
-        #{id => service_subscriber_db,
-          start => {service_subscriber_db, start_link, []},
+        #{id => service_subscriber_worker_sup,
+          start => {service_subscriber_worker_sup, start_link, []},
           restart => permanent,
-          shutdown => 5000,
-          type => worker,
-          modules => [service_subscriber_db]},
+          shutdown => infinity,
+          type => supervisor,
+          modules => [service_subscriber_worker_sup]}
+    ] ++ DBWorkers ++ [
         #{id => service_subscriber_mqtt,
           start => {service_subscriber_mqtt, start_link, []},
           restart => permanent,

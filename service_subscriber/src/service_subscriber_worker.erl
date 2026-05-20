@@ -30,6 +30,7 @@ start_link(Topic) ->
 
 %% @private
 init([Topic]) ->
+    ets:insert(service_subscriber_workers, {Topic, self()}),
 	{ok, #state{topic = Topic}}.
 
 %% @private
@@ -47,11 +48,7 @@ handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
 
     % Convert RFC3339 binary to Erlang datetime tuple for epgsql
     % TIMESTAMPTZ expects {{Year, Month, Day}, {Hour, Minute, Second}} where Second can be a float
-    ST = calendar:rfc3339_to_system_time(binary_to_list(Timestamp), [{unit, microsecond}]),
-    Secs = ST div 1000000,
-    Micro = ST rem 1000000,
-    {{Y, Mo, D}, {H, Mi, S}} = calendar:system_time_to_universal_time(Secs, second),
-    ErlTimestamp = {{Y, Mo, D}, {H, Mi, S + Micro / 1000000.0}},
+    {ErlTimestamp, ST} = fast_parse_timestamp(Timestamp),
 
     % Insert into TimescaleDB
     % Table: Data (DeviceName TEXT, Value INTEGER, Timestamp TIMESTAMPTZ)
@@ -131,5 +128,27 @@ extract_device_name(Topic) ->
     end.
 
 %% @private
-terminate(_Reason, #state{}) ->
+terminate(_Reason, #state{topic = Topic}) ->
+    ets:delete(service_subscriber_workers, Topic),
     ok.
+
+fast_parse_timestamp(<<Y1,Y2,Y3,Y4, $-, Mo1,Mo2, $-, D1,D2, $T, H1,H2, $:, Mi1,Mi2, $:, S1,S2, $., Ms1,Ms2,Ms3, $Z>>) ->
+    Year  = (Y1 - $0) * 1000 + (Y2 - $0) * 100 + (Y3 - $0) * 10 + (Y4 - $0),
+    Month = (Mo1 - $0) * 10 + (Mo2 - $0),
+    Day   = (D1 - $0) * 10 + (D2 - $0),
+    Hour  = (H1 - $0) * 10 + (H2 - $0),
+    Min   = (Mi1 - $0) * 10 + (Mi2 - $0),
+    Sec   = (S1 - $0) * 10 + (S2 - $0),
+    Ms    = (Ms1 - $0) * 100 + (Ms2 - $0) * 10 + (Ms3 - $0),
+    ErlTimestamp = {{Year, Month, Day}, {Hour, Min, Sec + Ms / 1000.0}},
+    GregorianSecs = calendar:datetime_to_gregorian_seconds({{Year, Month, Day}, {Hour, Min, Sec}}),
+    UnixSecs = GregorianSecs - 62167219200,
+    ST = UnixSecs * 1000000 + Ms * 1000,
+    {ErlTimestamp, ST};
+fast_parse_timestamp(Timestamp) ->
+    ST = calendar:rfc3339_to_system_time(binary_to_list(Timestamp), [{unit, microsecond}]),
+    Secs = ST div 1000000,
+    Micro = ST rem 1000000,
+    {{Y, Mo, D}, {H, Mi, S}} = calendar:system_time_to_universal_time(Secs, second),
+    ErlTimestamp = {{Y, Mo, D}, {H, Mi, S + Micro / 1000000.0}},
+    {ErlTimestamp, ST}.
