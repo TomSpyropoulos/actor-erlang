@@ -7,6 +7,8 @@
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+-include_lib("kernel/include/logger.hrl").
+
 %% @doc The state of the subscriber MQTT handler.
 %% `conn_opts`: Options used to connect to the MQTT broker.
 %% `conn_pid`: The PID of the emqtt client.
@@ -28,7 +30,7 @@ start_link() ->
 %% @private
 %% @doc Initializes the server state and triggers connection.
 init([]) ->
-	io:format("MQTT Subscriber Started~n"),
+	?LOG_INFO("MQTT Subscriber Started"),
 	self() ! connect_mqtt,
 	timer:send_interval(5000, send_heartbeat),
     % Create a public ETS table for lock-free worker routing
@@ -56,7 +58,7 @@ handle_info(connect_mqtt, #state{conn_opts = Opts} = State) ->
     Topic = <<"sensors/#">>,
 
     _ = (catch emqtt:subscribe(Pid, {Topic, 0})),
-    io:format("Subscribed to ~p~n", [Topic]),
+    ?LOG_INFO("Subscribed to ~p", [Topic]),
     {noreply, State#state{
         conn_pid = Pid,
         topic = Topic
@@ -72,7 +74,15 @@ handle_info(send_heartbeat, State) ->
 %% @private
 %% @doc Handle incoming publish messages from the MQTT broker.
 handle_info({publish, #{topic := Topic, payload := Payload}}, State) when is_binary(Topic) ->
-	spawn_or_forward(Topic, Payload, State).
+	spawn_or_forward(Topic, Payload, State);
+
+%% @private
+%% @doc Handle worker process going down — remove its stale ETS entry.
+handle_info({'DOWN', _Ref, process, Pid, _Reason}, State) ->
+    %% Linear scan is acceptable: the table is tiny (one entry per unique sensor topic)
+    %% and DOWN events are rare (only on worker crash/stop).
+    ets:match_delete(service_subscriber_workers, {'_', Pid}),
+    {noreply, State}.
 
 %% @private
 %% @doc Disconnects from MQTT on termination.
@@ -90,15 +100,10 @@ terminate(_Reason, #state{conn_pid = MqttPid}) ->
 spawn_or_forward(Topic, Payload, State) ->
     case ets:lookup(service_subscriber_workers, Topic) of
         [{Topic, Pid}] ->
-            case erlang:is_process_alive(Pid) of
-                true ->
-                    gen_server:cast(Pid, Payload),
-                    {noreply, State};
-                false ->
-                    ets:delete(service_subscriber_workers, Topic),
-                    spawn_and_forward(Topic, Payload),
-                    {noreply, State}
-            end;
+            %% Worker is known — cast directly. No is_process_alive check needed;
+            %% if the worker is dead we'll receive a 'DOWN' message and clean up ETS.
+            gen_server:cast(Pid, Payload),
+            {noreply, State};
         [] ->
             spawn_and_forward(Topic, Payload),
             {noreply, State}
@@ -108,12 +113,16 @@ spawn_and_forward(Topic, Payload) ->
     spawn(fun() ->
         case service_subscriber_worker_sup:start_worker(Topic) of
             {ok, Pid} ->
+                %% Monitor the new worker so we can clean up ETS if it crashes.
+                erlang:monitor(process, Pid),
                 gen_server:cast(Pid, Payload);
             {error, {already_started, Pid}} ->
+                erlang:monitor(process, Pid),
                 ets:insert(service_subscriber_workers, {Topic, Pid}),
                 gen_server:cast(Pid, Payload);
             {error, already_present} ->
                 {ok, Pid} = supervisor:restart_child(service_subscriber_worker_sup, Topic),
+                erlang:monitor(process, Pid),
                 ets:insert(service_subscriber_workers, {Topic, Pid}),
                 gen_server:cast(Pid, Payload)
         end

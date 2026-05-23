@@ -2,6 +2,8 @@
 -module(service_subscriber_sup).
 -behaviour(supervisor).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([start_link/0]).
 -export([init/1]).
 
@@ -9,7 +11,7 @@
 
 %% @doc Starts the supervisor.
 start_link() ->
-	io:format("Subscriber Supervisor Started~n"),
+	?LOG_INFO("Subscriber Supervisor Started"),
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
 %% @private
@@ -28,7 +30,7 @@ init([]) ->
           shutdown => 5000,
           type => worker,
           modules => [service_subscriber_db]}
-        || I <- lists:seq(1, 5)
+        || I <- lists:seq(1, 20)
     ],
 
     ChildSpecs = [

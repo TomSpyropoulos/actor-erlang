@@ -7,6 +7,8 @@
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+-include_lib("kernel/include/logger.hrl").
+
 %% @doc The state of a sensor worker actor.
 %% `topic`: The MQTT topic this worker is handling.
 %% `sum`: The running sum of all sensor values received.
@@ -107,7 +109,7 @@ handle_info(heartbeat, #state{topic = Topic, lastSeen = LastSeen, lastStatus = L
 
     case ShouldInsert of
         true ->
-            io:format("[Worker ~p] Sensor ~s is now ~s~n", [self(), DeviceName, NewStatus]),
+            ?LOG_INFO("[Worker ~p] Sensor ~s is now ~s", [self(), DeviceName, NewStatus]),
             service_subscriber_db:insert_status(DeviceName, NewStatus);
         false ->
             ok
