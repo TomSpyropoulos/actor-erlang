@@ -1,4 +1,5 @@
-%% @doc The root supervisor for the service_subscriber application.
+%% @doc Root supervisor. Starts children in dependency order:
+%%      metrics → worker_sup → db pool (20 workers) → mqtt client.
 -module(service_subscriber_sup).
 -behaviour(supervisor).
 
@@ -9,49 +10,47 @@
 
 -define(SERVER, ?MODULE).
 
-%% @doc Starts the supervisor.
 start_link() ->
-	?LOG_INFO("Subscriber Supervisor Started"),
+    ?LOG_INFO("Subscriber Supervisor Started"),
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
-%% @private
-%% @doc Initializes the supervision tree.
 init([]) ->
     SupFlags = #{
-        strategy => one_for_one,
+        strategy  => one_for_one,
         intensity => 3,
-        period => 5
+        period    => 5
     },
-    
+
+    %% One GenServer per DB connection; writes are sharded by DeviceName hash.
     DBWorkers = [
-        #{id => {service_subscriber_db, I},
-          start => {service_subscriber_db, start_link, [I]},
+        #{id      => {service_subscriber_db, I},
+          start   => {service_subscriber_db, start_link, [I]},
           restart => permanent,
           shutdown => 5000,
-          type => worker,
+          type    => worker,
           modules => [service_subscriber_db]}
         || I <- lists:seq(1, 20)
     ],
 
     ChildSpecs = [
-        #{id => service_subscriber_metrics,
-          start => {service_subscriber_metrics, start_link, []},
+        #{id      => service_subscriber_metrics,
+          start   => {service_subscriber_metrics, start_link, []},
           restart => permanent,
           shutdown => 5000,
-          type => worker,
+          type    => worker,
           modules => [service_subscriber_metrics]},
-        #{id => service_subscriber_worker_sup,
-          start => {service_subscriber_worker_sup, start_link, []},
+        #{id      => service_subscriber_worker_sup,
+          start   => {service_subscriber_worker_sup, start_link, []},
           restart => permanent,
           shutdown => infinity,
-          type => supervisor,
+          type    => supervisor,
           modules => [service_subscriber_worker_sup]}
     ] ++ DBWorkers ++ [
-        #{id => service_subscriber_mqtt,
-          start => {service_subscriber_mqtt, start_link, []},
+        #{id      => service_subscriber_mqtt,
+          start   => {service_subscriber_mqtt, start_link, []},
           restart => permanent,
           shutdown => 5000,
-          type => worker,
+          type    => worker,
           modules => [service_subscriber_mqtt]}
     ],
     {ok, {SupFlags, ChildSpecs}}.

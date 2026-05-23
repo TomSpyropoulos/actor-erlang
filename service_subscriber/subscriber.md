@@ -24,7 +24,7 @@ The application is built around an OTP **Supervision Tree** optimized for massiv
 - **MQTT Client (`service_subscriber_mqtt`)**: A GenServer managing the connection to the Mosquitto broker. It performs extremely fast, lock-free lookups in a shared ETS routing table to route payloads. If a sensor topic is new, it delegates startup asynchronously to avoid blocking the main MQTT loop.
 - **Dynamic Worker Supervisor (`service_subscriber_worker_sup`)**: A supervisor managing the lifecycle of dynamically spawned sensor workers.
 - **Worker Actors (`service_subscriber_worker`)**: Dynamically spawned processes handling JSON decoding, database insert calls, and metrics reporting. They register themselves in the shared ETS table upon initialization.
-- **Database Connection Pool (`service_subscriber_db`)**: A pool of 5 parallel processes holding independent connections to TimescaleDB. Writes are dispatched asynchronously via `gen_server:cast` to the pool using a hash of the `DeviceName` to guarantee chronological write order per sensor. The database workers then execute these writes in a **fully asynchronous, non-blocking manner using `epgsqla:prepared_query/3`** with SQL queries prepared once at startup. This enables query pipelining and guarantees that DB worker processes never block on database network socket I/O.
+- **Database Connection Pool (`service_subscriber_db`)**: A pool of **20** parallel processes holding independent connections to TimescaleDB. Writes are dispatched asynchronously via `gen_server:cast` to the pool using a hash of the `DeviceName` to guarantee chronological write order per sensor. The database workers then execute these writes in a **fully asynchronous, non-blocking manner using `epgsqla:prepared_query/3`** with SQL queries prepared once at startup. This enables query pipelining and guarantees that DB worker processes never block on database network socket I/O.
 - **Metrics Server (`service_subscriber_metrics`)**: A centralized service for declaring and exposing Prometheus metrics.
 
 ## 📊 Metrics Tracking
@@ -41,7 +41,7 @@ The Subscriber implements a heartbeat-based missing sensor detection system:
 - The MQTT client uses a lock-free `ets:foldl/3` traversal over the shared worker routing table to send heartbeats, preventing any single process map traversal bottleneck.
 - Each worker compares its `lastSeen` timestamp (captured using the subscriber's local clock) against the current time.
 - If a sensor has not sent data within the last second, its status transitions to `MISSING`; otherwise it is `ALIVE`.
-- State changes are logged (`io:format`) and persisted to the `sensor_status` table in TimescaleDB, but only when the status actually changes to avoid unnecessary writes.
+- State changes are logged via `logger` and persisted to the `sensor_status` table in TimescaleDB, but only when the status actually changes to avoid unnecessary writes.
 
 ## 📡 MQTT Quality of Service
 
@@ -49,19 +49,8 @@ The subscriber connects with **QoS 0 (At Most Once)**. This provides fire-and-fo
 
 ## 📝 Performance & Bottlenecks Status
 
-The architectural bottlenecks limiting subscriber performance have been addressed in the `perf_fix` branch:
-
-1. **[SOLVED] Single Synchronous DB Connection**
-   `service_subscriber_db` is now structured as a connection pool of 5 parallel connections. All writes are beautifully load-balanced across the pool.
-
-2. **[SOLVED] Workers Block on DB Calls & DB Socket Blocking**
-   Database insertions are asynchronous via `gen_server:cast`, so sensor workers never block. Furthermore, the database pool processes themselves use the **`epgsqla` asynchronous driver API** with statements prepared once at startup. This ensures the database workers never block on network sockets or disk I/O, allowing them to pipeline thousands of queries concurrently in a true non-blocking "send-and-forget" manner.
-
-3. **[SOLVED] Single MQTT Message Handler Blocking**
-   Lookups use a lock-free named ETS table (`service_subscriber_workers`) with `{read_concurrency, true}`. New dynamic topic spawns are delegated asynchronously to `service_subscriber_worker_sup` via a spawned task. The `service_subscriber_mqtt` gateway process never blocks for a single millisecond.
-
-4. **[SOLVED] Expensive Timestamp Parsing**
-   Workers parse UTC RFC3339 timestamps using high-speed binary pattern-matching (`fast_parse_timestamp/1`) with zero string/list allocations and optimized gregorian calculations, dropping CPU usage and GC runs down to a fraction of before.
-
-5. **[OPEN] Quantile Summary Metrics Overhead**
+1. **[TODO] Quantile Summary Metrics Overhead**
    `prometheus_quantile_summary:observe/2` uses a streaming algorithm backed by ETS. Under high concurrency from many workers, it remains a potential lock-contention point that could be replaced with a `prometheus_histogram` in the future.
+
+2. **[TODO] Write Batching**
+   Each message currently triggers an individual `INSERT`. Buffering rows and flushing as a multi-row `INSERT ... VALUES (...), (...), ...` every N rows or T milliseconds would significantly increase DB throughput.

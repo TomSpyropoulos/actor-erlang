@@ -1,16 +1,14 @@
-%% @doc The entry point for the service_subscriber Erlang application.
+%% @doc OTP application entry point. Starts the Prometheus HTTP server and
+%%      the root supervision tree.
 -module(service_subscriber_app).
 -behaviour(application).
 
 -export([start/2, stop/1]).
 
-%% @private
 start(_Type, _Args) ->
-	io:format("Subscriber App Started~n"),
-    % Start Prometheus metrics server on default port 8081
+    io:format("Subscriber App Started~n"),
     prometheus_httpd:start(),
     service_subscriber_sup:start_link().
 
-%% @private
 stop(_State) ->
     ok.
