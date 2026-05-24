@@ -54,7 +54,7 @@ handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
 
     % Insert into TimescaleDB
     % Table: Data (DeviceName TEXT, Value INTEGER, Timestamp TIMESTAMPTZ)
-    service_subscriber_db:insert(DeviceName, Value, ErlTimestamp),
+    service_subscriber_db:insert(DeviceName, Value, ErlTimestamp, ST),
 
     %% --- Prometheus Metrics Recording ---
     %% We need to calculate the end-to-end latency of the message.
