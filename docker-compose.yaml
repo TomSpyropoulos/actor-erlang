@@ -113,6 +113,8 @@ services:
     depends_on:
       mosquitto:
         condition: service_healthy
+      timescaledb:
+        condition: service_healthy
 
   # Service Subscriber: Consumes and processes sensor data.
   subscriber:

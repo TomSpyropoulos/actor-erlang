@@ -12,13 +12,13 @@
 %% `conn_pid`: The PID of the emqtt client.
 %% `topic`: The MQTT topic this publisher is sending data to.
 %% `sensor`: The unique identifier for this sensor (derived from HOSTNAME).
-%% `interval`: The interval in milliseconds between data publications.
+%% `timer_ref`: Ref returned by timer:send_interval/2, kept for cancellation on shutdown.
 -record(state, {
-	conn_opts:: [{atom(), term()}],
-    conn_pid :: pid() | undefined,
-    topic    :: binary() | undefined,
-	sensor	 :: binary() | undefined,
-    interval :: integer() | undefined
+	conn_opts  :: [{atom(), term()}],
+    conn_pid   :: pid() | undefined,
+    topic      :: binary() | undefined,
+	sensor     :: binary() | undefined,
+    timer_ref  :: timer:tref() | undefined  % ref returned by timer:send_interval/2
 }).
 
 %% --- API Functions ---
@@ -36,12 +36,10 @@ publish(Topic, Payload) ->
 %% @private
 %% @doc Initializes the server state and triggers the connection process.
 init([]) ->
-	% initialize worker
 	io:format("Publisher Worker Started~n"),
 	self() ! connect,
     {ok, #state{
-		conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, client_id_from_hostname()}],
-		interval = 1 % Interval in ms, at which a message will be published
+		conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, client_id_from_hostname()}]
     }}.
 
 %% @private
@@ -57,25 +55,24 @@ handle_cast(_Msg, State) ->
 
 %% @private
 %% @doc Handles the 'connect' message to establish MQTT connection.
-handle_info(connect, _State = #state{conn_opts = Opts, interval = Interval}) ->
-    % Connect to MQTT broker
+handle_info(connect, _State = #state{conn_opts = Opts}) ->
     {ok, Pid} = emqtt:start_link(Opts),
     {ok, _} = emqtt:connect(Pid),
-	
-    % Schedule the first periodic publication
-	erlang:send_after(Interval, self(), publish_tick),
-	
-    % Generate a unique sensor name using the container's HOSTNAME
-	OsHostname = case os:getenv("HOSTNAME") of false -> "unknown"; H -> H end,
+
+    % Wall-clock timer: fires every 1ms regardless of how long publish_tick takes.
+    % Equivalent to Pekko's .throttle(1000, 1.second).
+    {ok, TRef} = timer:send_interval(1, publish_tick),
+
+    OsHostname = case os:getenv("HOSTNAME") of false -> "unknown"; H -> H end,
 	SensorBin = iolist_to_binary(io_lib:format("sensor~s", [OsHostname])),
 	Topic = iolist_to_binary(["sensors/", SensorBin]),
-	
+
 	{noreply, #state{
 		conn_opts = Opts,
-		conn_pid = Pid,
-		topic = Topic,
-		sensor = SensorBin,
-		interval = Interval
+		conn_pid  = Pid,
+		topic     = Topic,
+		sensor    = SensorBin,
+		timer_ref = TRef
 	}};
 
 %% @private
@@ -83,22 +80,13 @@ handle_info(connect, _State = #state{conn_opts = Opts, interval = Interval}) ->
 handle_info(publish_tick,
 			State = #state{conn_pid = Pid,
 						   topic = Topic,
-						   sensor = SensorBin,
-						   interval = Interval}) ->
-    % Generate random sensor data
+						   sensor = SensorBin}) ->
 	RandomValue = integer_to_binary(rand:uniform(10)),
 	Timestamp = calendar:system_time_to_rfc3339(erlang:system_time(millisecond), [{unit, millisecond}, {offset, "Z"}]),
 	TimestampBinary = list_to_binary(Timestamp),
-	% Build a JSON payload
 	JsonMap = #{<<"device_name">> => SensorBin, <<"timestamp">> => TimestampBinary, <<"value">> => RandomValue},
 	Json = json:encode(JsonMap),
-    
-    % Publish to MQTT
     emqtt:publish(Pid, Topic, Json, 0),
-	% io:format("Published message from ~s: ~s~n", [SensorBin, Json]),
-    
-    % Schedule the next tick
-    erlang:send_after(Interval, self(), publish_tick),
     {noreply, State};
 
 %% @private
@@ -115,7 +103,8 @@ client_id_from_hostname() ->
 
 %% @private
 %% @doc Disconnects from MQTT broker on termination.
-terminate(_Reason, #state{conn_pid = Pid}) ->
+terminate(_Reason, #state{conn_pid = Pid, timer_ref = TRef}) ->
+    timer:cancel(TRef),
     if is_pid(Pid) -> emqtt:disconnect(Pid);
        true -> ok
     end,

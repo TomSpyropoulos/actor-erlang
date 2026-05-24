@@ -54,3 +54,7 @@ The subscriber connects with **QoS 0 (At Most Once)**. This provides fire-and-fo
 
 2. **[TODO] Write Batching**
    Each message currently triggers an individual `INSERT`. Buffering rows and flushing as a multi-row `INSERT ... VALUES (...), (...), ...` every N rows or T milliseconds would significantly increase DB throughput.
+
+3. **[TODO] Investigate Ingestion**
+   Right now the backend can handle 10k requests per second but unexpectedly it needs 20 publishers instead of 10, as it seems to cap at half the messages is should be processing (10 subscribers should produce 10k messages/sec but the subscriber stops at 5).
+   Also latencies are too low? p999 for 20 publishers is about 5ms. Is this correct? Are latencies reported correctly in prometheus?

@@ -147,6 +147,7 @@ fast_parse_timestamp(<<Y1,Y2,Y3,Y4, $-, Mo1,Mo2, $-, D1,D2, $T, H1,H2, $:, Mi1,M
     UnixSecs = GregorianSecs - 62167219200,
     ST = UnixSecs * 1000000 + Ms * 1000,
     {ErlTimestamp, ST};
+
 fast_parse_timestamp(Timestamp) ->
     ST = calendar:rfc3339_to_system_time(binary_to_list(Timestamp), [{unit, microsecond}]),
     Secs = ST div 1000000,
