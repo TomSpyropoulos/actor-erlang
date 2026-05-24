@@ -4,10 +4,12 @@
 -module(service_subscriber_worker_sup).
 -behaviour(supervisor).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([start_link/0, start_worker/1, init/1]).
 
 start_link() ->
-    io:format("Worker Supervisor Started~n"),
+    ?LOG_INFO("Worker Supervisor Started"),
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 %% @doc Spawns a worker for `Topic`. Returns {error, {already_started, Pid}}

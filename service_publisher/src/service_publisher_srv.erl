@@ -7,6 +7,8 @@
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+-include_lib("kernel/include/logger.hrl").
+
 %% @doc The state of the publisher server.
 %% `conn_opts`: Options used to connect to the MQTT broker.
 %% `conn_pid`: The PID of the emqtt client.
@@ -36,7 +38,7 @@ publish(Topic, Payload) ->
 %% @private
 %% @doc Initializes the server state and triggers the connection process.
 init([]) ->
-	io:format("Publisher Worker Started~n"),
+	?LOG_INFO("Publisher Worker Started"),
 	self() ! connect,
     {ok, #state{
 		conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, client_id_from_hostname()}]

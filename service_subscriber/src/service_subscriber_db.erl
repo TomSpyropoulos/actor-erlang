@@ -7,6 +7,7 @@
 -behaviour(gen_server).
 
 -include_lib("epgsql/include/epgsql.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -export([start_link/1, insert/3, insert_status/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -42,7 +43,7 @@ init([Index]) ->
         database => "epu",
         timeout  => 5000
     }),
-    io:format("Connected to TimescaleDB worker ~p~n", [Index]),
+    ?LOG_INFO("Connected to TimescaleDB worker ~p", [Index]),
 
     %% Parse statements once at startup to avoid per-query parse round-trips.
     {ok, InsertStmt} = epgsql:parse(DB, "insert_data_" ++ integer_to_list(Index),

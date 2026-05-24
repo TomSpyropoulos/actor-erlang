@@ -2,10 +2,12 @@
 -module(service_publisher_app).
 -behaviour(application).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([start/2, stop/1]).
 
 start(_Type, _Args) ->
-    io:format("Publisher App Started~n"),
+    ?LOG_INFO("Publisher App Started"),
     service_publisher_sup:start_link().
 
 stop(_State) ->

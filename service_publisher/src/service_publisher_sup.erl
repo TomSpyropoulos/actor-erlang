@@ -3,6 +3,8 @@
 -module(service_publisher_sup).
 -behaviour(supervisor).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([start_link/0]).
 -export([init/1]).
 
@@ -10,7 +12,7 @@
 
 -spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
-    io:format("Publisher Supervisor Started~n"),
+    ?LOG_INFO("Publisher Supervisor Started"),
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
 init([]) ->
