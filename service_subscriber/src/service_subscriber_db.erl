@@ -1,18 +1,18 @@
 %% @doc DB connection pool — one GenServer per connection (pool of 20).
 %%
-%% Writes are sharded by hashing DeviceName so a given sensor always hits the
-%% same worker (preserving write order). Queries are fire-and-forget via
-%% epgsqla; results arrive in handle_info and are discarded.
+%% Writes are distributed across workers via round-robin. Queries are
+%% fire-and-forget via epgsqla; results arrive in handle_info and are discarded.
 -module(service_subscriber_db).
 -behaviour(gen_server).
 
 -include_lib("epgsql/include/epgsql.hrl").
 -include_lib("kernel/include/logger.hrl").
 
--export([start_link/1, insert/4, insert_status/2]).
+-export([start_link/1, init_counter/0, insert/4, insert_status/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(POOL_SIZE, 20).
+-define(COUNTER_KEY, {?MODULE, round_robin_counter}).
 
 -record(state, {
     db_pid             :: pid() | undefined,
@@ -25,21 +25,29 @@ start_link(Index) ->
     Name = worker_name(Index),
     gen_server:start_link({local, Name}, ?MODULE, [Index], []).
 
+%% Initialise the atomic round-robin counter. Must be called before any insert.
+init_counter() ->
+    Ref = atomics:new(1, [{signed, false}]),
+    persistent_term:put(?COUNTER_KEY, Ref).
+
 %% Atom name for pool slot Index, e.g. service_subscriber_db_3.
 worker_name(Index) ->
     list_to_atom("service_subscriber_db_" ++ integer_to_list(Index)).
+
+next_index() ->
+    Ref = persistent_term:get(?COUNTER_KEY),
+    N = atomics:add_get(Ref, 1, 1),
+    ((N - 1) rem ?POOL_SIZE) + 1.
 
 %% @doc Async insert of a sensor data row. Non-blocking for the caller.
 %% MsgTimestampUs is the publisher timestamp in microseconds, carried through
 %% so the DB worker can observe E2E latency when the epgsqla ack arrives.
 insert(DeviceName, Value, ErlTimestamp, MsgTimestampUs) ->
-    Index = erlang:phash2(DeviceName, ?POOL_SIZE) + 1,
-    gen_server:cast(worker_name(Index), {insert, DeviceName, Value, ErlTimestamp, MsgTimestampUs}).
+    gen_server:cast(worker_name(next_index()), {insert, DeviceName, Value, ErlTimestamp, MsgTimestampUs}).
 
 %% @doc Async insert of a sensor status change row. Non-blocking for the caller.
 insert_status(DeviceName, Status) ->
-    Index = erlang:phash2(DeviceName, ?POOL_SIZE) + 1,
-    gen_server:cast(worker_name(Index), {insert_status, DeviceName, Status}).
+    gen_server:cast(worker_name(next_index()), {insert_status, DeviceName, Status}).
 
 init([Index]) ->
     {ok, DB} = epgsql:connect("timescaledb", "postgres", "postgres", #{

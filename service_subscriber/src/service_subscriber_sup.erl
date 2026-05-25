@@ -21,7 +21,9 @@ init([]) ->
         period    => 5
     },
 
-    %% One GenServer per DB connection; writes are sharded by DeviceName hash.
+    service_subscriber_db:init_counter(),
+
+    %% One GenServer per DB connection; writes are distributed via round-robin.
     DBWorkers = [
         #{id      => {service_subscriber_db, I},
           start   => {service_subscriber_db, start_link, [I]},
