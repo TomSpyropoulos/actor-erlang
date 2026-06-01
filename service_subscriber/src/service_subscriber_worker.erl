@@ -115,6 +115,10 @@ handle_info(heartbeat, #state{topic = Topic, lastSeen = LastSeen, lastStatus = L
             ok
     end,
 
+    %% Always update the gauge so Prometheus always reflects the current state,
+    %% even when the status hasn't changed since the last heartbeat.
+    service_subscriber_metrics:set_sensor_status(DeviceName, NewStatus),
+
     {noreply, State#state{lastStatus = NewStatus}};
 
 %% @private

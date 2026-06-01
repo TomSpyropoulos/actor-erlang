@@ -678,8 +678,80 @@
           "refId": "A"
         }
       ],
-      "title": "Publisher → DB E2E Latencies [Milliseconds]",
+      "title": "Publisher \u2192 DB E2E Latencies [Milliseconds]",
       "type": "barchart"
+    },
+    {
+      "id": 8,
+      "title": "Sensor Liveness (Alive vs Missing)",
+      "type": "bargauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "my-prometheus-datasource"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "expr": "sum(subscriber_sensor_up)",
+          "legendFormat": "Alive",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "expr": "count(subscriber_sensor_up) - sum(subscriber_sensor_up)",
+          "legendFormat": "Missing",
+          "instant": true
+        }
+      ]
     }
   ],
   "preload": false,
