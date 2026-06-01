@@ -8,7 +8,7 @@ The **Service Publisher** is an Erlang-based application designed to simulate th
    When a Publisher instance starts, it generates a unique sensor identifier based on the container's hostname. It then continuously simulates telemetry data, behaving exactly like a hardware sensor deployed in the field.
 
 2. **Data Generation:**
-   The service periodically (e.g., once every interval) generates a random data point. The payload is constructed as a JSON object containing:
+   The service generates a random data point **every 1 millisecond** (1000 readings/second per instance) using a wall-clock timer that fires regardless of how long each publish takes. The payload is constructed as a JSON object containing:
    - `device_name`: The unique identifier of the sensor (e.g., `sensor-abcd1234`).
    - `timestamp`: An ISO-8601 (RFC 3339) formatted timestamp denoting when the reading was recorded.
    - `value`: A randomly generated sensor value.
