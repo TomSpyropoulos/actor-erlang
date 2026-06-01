@@ -29,9 +29,15 @@ The application is built around an OTP **Supervision Tree** optimized for massiv
 
 ## 📊 Metrics Tracking
 
-The Subscriber heavily utilizes Prometheus for observability. 
+The Subscriber exposes the following Prometheus metrics on port `8081` (raw endpoint: `http://localhost:8081/metrics`):
 
-One of the critical metrics tracked is the end-to-end latency. This is tracked using a `prometheus_quantile_summary`, which accurately calculates the P50, P95, P99, and P999 latency percentiles dynamically on the client-side. The library expects time measurements to be supplied in Erlang's native time unit (when the metric name ends in a time duration suffix like `_milliseconds`), automatically converting it to milliseconds for the Grafana dashboard.
+- `subscriber_requests_total`: Total count of MQTT messages processed.
+- `subscriber_request_latency_milliseconds`: Latency from publisher send to subscriber receive, with quantiles (p50, p95, p99, p999).
+- `subscriber_e2e_latency_milliseconds`: End-to-end latency from publisher send to DB write ack, with quantiles (p50, p95, p99, p999).
+- `subscriber_db_write_latency_milliseconds`: Latency from subscriber receive to DB write ack, with quantiles (p50, p95, p99, p999).
+- `subscriber_sensor_up{device="<name>"}`: Per-sensor liveness gauge — `1` = ALIVE, `0` = MISSING. Updated every heartbeat.
+
+Latency metrics use `prometheus_quantile_summary`, which calculates percentiles accurately on the client side using a streaming algorithm. The library expects values in Erlang's native time unit when the metric name ends in `_milliseconds`, and converts automatically for Grafana.
 
 ## 🔍 Missing Sensor Detection
 
