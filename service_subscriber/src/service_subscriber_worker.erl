@@ -52,18 +52,22 @@ handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
     % TIMESTAMPTZ expects {{Year, Month, Day}, {Hour, Minute, Second}} where Second can be a float
     {ErlTimestamp, ST} = fast_parse_timestamp(Timestamp),
 
+    %% Capture processing-start time before the DB insert so the DB pool can later
+    %% compute subscriber→DB write latency when the async ack arrives.
+    ProcessingStartUs = os:system_time(microsecond),
+
     % Insert into TimescaleDB
     % Table: Data (DeviceName TEXT, Value INTEGER, Timestamp TIMESTAMPTZ)
-    service_subscriber_db:insert(DeviceName, Value, ErlTimestamp, ST),
+    service_subscriber_db:insert(DeviceName, Value, ErlTimestamp, ST, ProcessingStartUs),
 
     %% --- Prometheus Metrics Recording ---
     %% We need to calculate the end-to-end latency of the message.
     %% This is done by comparing the timestamp embedded in the JSON payload (created by the publisher)
     %% with the current system time.
     %%
-    %% 1. `os:system_time(microsecond)` gives us the current time in microseconds.
+    %% 1. Reuse ProcessingStartUs (captured above) — same moment, avoids a redundant syscall.
     %% 2. `ST` is the payload timestamp, already parsed into microseconds earlier in this function.
-    Now = os:system_time(microsecond),
+    Now = ProcessingStartUs,
     RawLatencyUs = Now - ST,
 
     %% 3. Clock drift between the publisher and subscriber containers could potentially

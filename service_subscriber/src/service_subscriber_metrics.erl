@@ -3,7 +3,7 @@
 
 %% API
 -export([start_link/0]).
--export([inc_requests/0, observe_latency/1, observe_e2e_latency/1, set_sensor_status/2]).
+-export([inc_requests/0, observe_latency/1, observe_e2e_latency/1, observe_db_write_latency/1, set_sensor_status/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -23,6 +23,9 @@ observe_latency(Latency) ->
 
 observe_e2e_latency(Latency) ->
     prometheus_quantile_summary:observe(subscriber_e2e_latency_milliseconds, Latency).
+
+observe_db_write_latency(Latency) ->
+    prometheus_quantile_summary:observe(subscriber_db_write_latency_milliseconds, Latency).
 
 %% @doc Records the current liveness of a sensor as a gauge (1 = ALIVE, 0 = MISSING).
 %% Called on every heartbeat so the gauge always reflects the current state.
@@ -59,6 +62,13 @@ init([]) ->
     prometheus_quantile_summary:declare([
         {name, subscriber_e2e_latency_milliseconds},
         {help, "End-to-end latency in milliseconds (DB ack - Payload Timestamp)."},
+        {labels, []},
+        {quantiles, [0.5, 0.95, 0.99, 0.999]}
+    ]),
+
+    prometheus_quantile_summary:declare([
+        {name, subscriber_db_write_latency_milliseconds},
+        {help, "Latency from subscriber receive to DB write ack, in milliseconds."},
         {labels, []},
         {quantiles, [0.5, 0.95, 0.99, 0.999]}
     ]),

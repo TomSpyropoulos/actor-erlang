@@ -8,7 +8,7 @@
 -include_lib("epgsql/include/epgsql.hrl").
 -include_lib("kernel/include/logger.hrl").
 
--export([start_link/1, init_counter/0, insert/4, insert_status/2]).
+-export([start_link/1, init_counter/0, insert/5, insert_status/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(POOL_SIZE, 20).
@@ -18,7 +18,7 @@
     db_pid             :: pid() | undefined,
     insert_stmt        :: #statement{} | undefined,
     insert_status_stmt :: #statement{} | undefined,
-    pending            :: #{reference() => integer()}
+    pending            :: #{reference() => {integer(), integer()}}
 }).
 
 start_link(Index) ->
@@ -40,10 +40,11 @@ next_index() ->
     ((N - 1) rem ?POOL_SIZE) + 1.
 
 %% @doc Async insert of a sensor data row. Non-blocking for the caller.
-%% MsgTimestampUs is the publisher timestamp in microseconds, carried through
-%% so the DB worker can observe E2E latency when the epgsqla ack arrives.
-insert(DeviceName, Value, ErlTimestamp, MsgTimestampUs) ->
-    gen_server:cast(worker_name(next_index()), {insert, DeviceName, Value, ErlTimestamp, MsgTimestampUs}).
+%% MsgTimestampUs is the publisher timestamp in microseconds; ProcessingStartUs is
+%% when the subscriber worker began handling the message. Both are carried through
+%% so the DB worker can observe e2e and subscriber→DB write latencies on ack.
+insert(DeviceName, Value, ErlTimestamp, MsgTimestampUs, ProcessingStartUs) ->
+    gen_server:cast(worker_name(next_index()), {insert, DeviceName, Value, ErlTimestamp, MsgTimestampUs, ProcessingStartUs}).
 
 %% @doc Async insert of a sensor status change row. Non-blocking for the caller.
 insert_status(DeviceName, Status) ->
@@ -71,12 +72,12 @@ init([Index]) ->
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
-handle_cast({insert, DeviceName, Value, ErlTimestamp, MsgTimestampUs},
+handle_cast({insert, DeviceName, Value, ErlTimestamp, MsgTimestampUs, ProcessingStartUs},
             #state{db_pid = DB, insert_stmt = InsertStmt, pending = Pending} = State) ->
     #statement{types = Types} = InsertStmt,
     TypedParams = lists:zip(Types, [DeviceName, Value, ErlTimestamp]),
     Ref = epgsqla:prepared_query(DB, InsertStmt, TypedParams),
-    {noreply, State#state{pending = Pending#{Ref => MsgTimestampUs}}};
+    {noreply, State#state{pending = Pending#{Ref => {MsgTimestampUs, ProcessingStartUs}}}};
 
 handle_cast({insert_status, DeviceName, Status}, #state{db_pid = DB, insert_status_stmt = InsertStatusStmt} = State) ->
     #statement{types = Types} = InsertStatusStmt,
@@ -90,10 +91,14 @@ handle_cast(_Msg, State) ->
 %% Receives async query results from epgsqla. For data inserts, observe E2E latency.
 handle_info({DB, Ref, _Result}, #state{db_pid = DB, pending = Pending} = State) when is_reference(Ref) ->
     NewPending = case maps:take(Ref, Pending) of
-        {MsgTimestampUs, Rest} ->
-            E2EUs = max(0, os:system_time(microsecond) - MsgTimestampUs),
+        {{MsgTimestampUs, ProcessingStartUs}, Rest} ->
+            AckUs = os:system_time(microsecond),
+            E2EUs     = max(0, AckUs - MsgTimestampUs),
+            SubToDbUs = max(0, AckUs - ProcessingStartUs),
             service_subscriber_metrics:observe_e2e_latency(
                 erlang:convert_time_unit(E2EUs, microsecond, native)),
+            service_subscriber_metrics:observe_db_write_latency(
+                erlang:convert_time_unit(SubToDbUs, microsecond, native)),
             Rest;
         error ->
             Pending
