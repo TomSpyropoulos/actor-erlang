@@ -123,6 +123,12 @@ services:
     restart: unless-stopped
     ports:
       - "8081:8081"
+    environment:
+      DB_BACKEND:  ${DB_BACKEND:-timescaledb}
+      DB_HOST:     ${DB_HOST:-timescaledb}
+      DB_USER:     ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_NAME:     ${DB_NAME:-epu}
     depends_on:
       mosquitto:
         condition: service_healthy

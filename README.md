@@ -8,7 +8,7 @@ The system consists of the following components:
 
 1.  **Service Publisher**: An Erlang application that simulates IoT sensors. Each instance generates sensor readings (JSON) and publishes them to an MQTT broker. See [service_publisher/publisher.md](service_publisher/publisher.md) for more details.
 2.  **Mosquitto MQTT Broker**: Acts as the central messaging hub, facilitating communication between publishers and subscribers.
-3.  **Service Subscriber**: An Erlang application that consumes messages from the `sensors/#` wildcard topic. It dynamically creates a dedicated **Worker Actor** (GenServer) for each unique sensor topic to maintain state (running sum and last timestamp) while tracking metrics. Features an ultra-fast lock-free ETS-based dynamic actor routing table and a parallel TimescaleDB connection pool with asynchronous writes for extreme throughput. See [service_subscriber/subscriber.md](service_subscriber/subscriber.md) for more details.
+3.  **Service Subscriber**: An Erlang application that consumes messages from the `sensors/#` wildcard topic. It dynamically creates a dedicated **Worker Actor** (GenServer) for each unique sensor topic to maintain state (running sum and last timestamp) while tracking metrics. Features an ultra-fast lock-free ETS-based dynamic actor routing table and a parallel DB connection pool (20 GenServer workers, async writes via epgsql). The write path is pluggable: the active backend is selected at runtime via `DB_BACKEND`. See [service_subscriber/subscriber.md](service_subscriber/subscriber.md) for more details.
 4.  **Prometheus**: Scrapes metrics from the containers and the host system.
 5.  **Grafana**: Provides a visual dashboard for monitoring container resource usage (CPU/RAM) and application latency.
 
@@ -42,6 +42,36 @@ docker compose up -d --build --scale publisher=3
     docker logs -f subscriber
     ```
 
+## 🔬 Benchmarking
+
+The subscriber's DB write path is decoupled from any specific database through a pluggable backend (`db_backend` behaviour). The active backend is selected at startup via the `DB_BACKEND` environment variable, with no recompilation required.
+
+### Running a benchmark scenario
+
+Scenario files in `scenarios/` define the full environment for one benchmark run:
+
+```bash
+./bench.sh scenarios/timescale.env
+```
+
+This builds and starts the full stack with the given configuration. To stop:
+
+```bash
+docker compose down
+```
+
+### Available scenarios
+
+| File | Backend |
+|------|---------|
+| `scenarios/timescale.env` | TimescaleDB (baseline) |
+
+### Supported `DB_BACKEND` values
+
+| Value | Module | Description |
+|-------|--------|-------------|
+| `timescaledb` (default) | `db_backend_timescaledb` | PostgreSQL/TimescaleDB via epgsql, async writes |
+
 ## 🧠 Deep Dive: Erlang Concurrency
 
 ### Lightweight Processes vs. OS Threads
@@ -69,5 +99,5 @@ The current implementation uses **GenServers** to encapsulate state and logic, m
 - **Messaging**: MQTT (Mosquitto/via emqtt)
 - **JSON**: Built-in json (OTP 27+)
 - **Observability**: Prometheus & Grafana
-- **Database**: TimescaleDB
+- **Database**: Pluggable backends (TimescaleDB default)
 - **Deployment**: Docker & Docker Compose

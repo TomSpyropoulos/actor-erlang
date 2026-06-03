@@ -1,11 +1,11 @@
-%% @doc DB connection pool — one GenServer per connection (pool of 20).
+%% @doc DB dispatcher — one GenServer per connection (pool of 20).
 %%
-%% Writes are distributed across workers via round-robin. Queries are
-%% fire-and-forget via epgsqla; results arrive in handle_info and are discarded.
+%% Writes are distributed across workers via round-robin. The actual DB
+%% operations are delegated to a backend module selected at startup via the
+%% DB_BACKEND environment variable (default: timescaledb).
 -module(service_subscriber_db).
 -behaviour(gen_server).
 
--include_lib("epgsql/include/epgsql.hrl").
 -include_lib("kernel/include/logger.hrl").
 
 -export([start_link/1, init_counter/0, insert/5, insert_status/2]).
@@ -14,11 +14,12 @@
 -define(POOL_SIZE, 20).
 -define(COUNTER_KEY, {?MODULE, round_robin_counter}).
 
+%% pending maps async-write Refs to {MsgTimestampUs, ProcStartUs} so latencies
+%% can be computed when the backend ack arrives in handle_info/2.
 -record(state, {
-    db_pid             :: pid() | undefined,
-    insert_stmt        :: #statement{} | undefined,
-    insert_status_stmt :: #statement{} | undefined,
-    pending            :: #{reference() => {integer(), integer()}}
+    backend_mod   :: module(),
+    backend_state :: term(),
+    pending       :: #{reference() => {integer(), integer()}}
 }).
 
 start_link(Index) ->
@@ -40,76 +41,75 @@ next_index() ->
     ((N - 1) rem ?POOL_SIZE) + 1.
 
 %% @doc Async insert of a sensor data row. Non-blocking for the caller.
-%% MsgTimestampUs is the publisher timestamp in microseconds; ProcessingStartUs is
-%% when the subscriber worker began handling the message. Both are carried through
-%% so the DB worker can observe e2e and subscriber→DB write latencies on ack.
 insert(DeviceName, Value, ErlTimestamp, MsgTimestampUs, ProcessingStartUs) ->
-    gen_server:cast(worker_name(next_index()), {insert, DeviceName, Value, ErlTimestamp, MsgTimestampUs, ProcessingStartUs}).
+    gen_server:cast(worker_name(next_index()),
+                    {insert, DeviceName, Value, ErlTimestamp, MsgTimestampUs, ProcessingStartUs}).
 
 %% @doc Async insert of a sensor status change row. Non-blocking for the caller.
 insert_status(DeviceName, Status) ->
     gen_server:cast(worker_name(next_index()), {insert_status, DeviceName, Status}).
 
-init([Index]) ->
-    {ok, DB} = epgsql:connect("timescaledb", "postgres", "postgres", #{
-        database => "epu",
-        timeout  => 5000
-    }),
-    ?LOG_INFO("Connected to TimescaleDB worker ~p", [Index]),
+%% Maps DB_BACKEND to a backend module atom. Crashes on unknown values so
+%% misconfiguration is caught at worker startup rather than silently ignored.
+resolve_backend() ->
+    case os:getenv("DB_BACKEND", "timescaledb") of
+        "timescaledb" -> db_backend_timescaledb;
+        Unknown       -> error({unknown_db_backend, Unknown})
+    end.
 
-    %% Parse statements once at startup to avoid per-query parse round-trips.
-    {ok, InsertStmt} = epgsql:parse(DB, "insert_data_" ++ integer_to_list(Index),
-                                    "INSERT INTO Data (DeviceName, Value, Timestamp) VALUES ($1, $2, $3)", []),
-    {ok, InsertStatusStmt} = epgsql:parse(DB, "insert_status_" ++ integer_to_list(Index),
-                                          "INSERT INTO sensor_status (DeviceName, Status) VALUES ($1, $2)", []),
-    {ok, #state{
-        db_pid             = DB,
-        insert_stmt        = InsertStmt,
-        insert_status_stmt = InsertStatusStmt,
-        pending            = #{}
-    }}.
+init([Index]) ->
+    BackendMod = resolve_backend(),
+    {ok, BackendState} = BackendMod:init(Index),
+    {ok, #state{backend_mod=BackendMod, backend_state=BackendState, pending=#{}}}.
 
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
-handle_cast({insert, DeviceName, Value, ErlTimestamp, MsgTimestampUs, ProcessingStartUs},
-            #state{db_pid = DB, insert_stmt = InsertStmt, pending = Pending} = State) ->
-    #statement{types = Types} = InsertStmt,
-    TypedParams = lists:zip(Types, [DeviceName, Value, ErlTimestamp]),
-    Ref = epgsqla:prepared_query(DB, InsertStmt, TypedParams),
-    {noreply, State#state{pending = Pending#{Ref => {MsgTimestampUs, ProcessingStartUs}}}};
+handle_cast({insert, DeviceName, Value, ErlTs, MsgTs, ProcStart},
+            #state{backend_mod=Mod, backend_state=BS, pending=P} = S) ->
+    case Mod:insert(BS, DeviceName, Value, ErlTs, MsgTs, ProcStart) of
+        {async, Ref, NewBS} ->
+            {noreply, S#state{backend_state=NewBS,
+                              pending=P#{Ref => {MsgTs, ProcStart}}}};
+        {sync, {E2E, Sub}, NewBS} ->
+            record_latencies(E2E, Sub),
+            {noreply, S#state{backend_state=NewBS}}
+    end;
 
-handle_cast({insert_status, DeviceName, Status}, #state{db_pid = DB, insert_status_stmt = InsertStatusStmt} = State) ->
-    #statement{types = Types} = InsertStatusStmt,
-    TypedParams = lists:zip(Types, [DeviceName, Status]),
-    epgsqla:prepared_query(DB, InsertStatusStmt, TypedParams),
-    {noreply, State};
+handle_cast({insert_status, DeviceName, Status},
+            #state{backend_mod=Mod, backend_state=BS} = S) ->
+    {ok, NewBS} = Mod:insert_status(BS, DeviceName, Status),
+    {noreply, S#state{backend_state=NewBS}};
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% Receives async query results from epgsqla. For data inserts, observe E2E latency.
-handle_info({DB, Ref, _Result}, #state{db_pid = DB, pending = Pending} = State) when is_reference(Ref) ->
-    NewPending = case maps:take(Ref, Pending) of
-        {{MsgTimestampUs, ProcessingStartUs}, Rest} ->
-            AckUs = os:system_time(microsecond),
-            E2EUs     = max(0, AckUs - MsgTimestampUs),
-            SubToDbUs = max(0, AckUs - ProcessingStartUs),
-            service_subscriber_metrics:observe_e2e_latency(
-                erlang:convert_time_unit(E2EUs, microsecond, native)),
-            service_subscriber_metrics:observe_db_write_latency(
-                erlang:convert_time_unit(SubToDbUs, microsecond, native)),
-            Rest;
-        error ->
-            Pending
-    end,
-    {noreply, State#state{pending = NewPending}};
-handle_info(_Info, State) ->
-    {noreply, State}.
+%% Routes every incoming message through the backend. On a claimed async ack,
+%% looks up the stored timestamps and records e2e + subscriber->DB latencies.
+handle_info(Msg, #state{backend_mod=Mod, backend_state=BS, pending=P} = S) ->
+    case Mod:handle_result(Msg, BS) of
+        {match, Ref, NewBS} ->
+            NewP = case maps:take(Ref, P) of
+                {{MsgTs, ProcStart}, Rest} ->
+                    AckUs = os:system_time(microsecond),
+                    record_latencies(max(0, AckUs - MsgTs),
+                                     max(0, AckUs - ProcStart)),
+                    Rest;
+                error ->
+                    P
+            end,
+            {noreply, S#state{backend_state=NewBS, pending=NewP}};
+        {no_match, NewBS} ->
+            {noreply, S#state{backend_state=NewBS}}
+    end.
 
-terminate(_Reason, #state{db_pid = DB}) ->
-    case is_pid(DB) of
-        true  -> epgsql:close(DB);
-        false -> ok
-    end,
-    ok.
+terminate(_Reason, #state{backend_mod=Mod, backend_state=BS}) ->
+    Mod:terminate(BS).
+
+%% Converts microsecond durations to native time units before recording;
+%% the Prometheus summary expects native units for accurate quantile tracking.
+record_latencies(E2EUs, SubToDbUs) ->
+    service_subscriber_metrics:observe_e2e_latency(
+        erlang:convert_time_unit(E2EUs, microsecond, native)),
+    service_subscriber_metrics:observe_db_write_latency(
+        erlang:convert_time_unit(SubToDbUs, microsecond, native)).
