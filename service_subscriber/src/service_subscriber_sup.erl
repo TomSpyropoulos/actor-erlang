@@ -1,5 +1,5 @@
 %% @doc Root supervisor. Starts children in dependency order:
-%%      metrics → worker_sup → db pool (20 workers) → mqtt client.
+%%      metrics → worker_sup → db pool (DB_POOL_SIZE workers) → mqtt client.
 -module(service_subscriber_sup).
 -behaviour(supervisor).
 
@@ -23,6 +23,11 @@ init([]) ->
 
     service_subscriber_db:init_counter(),
 
+    %% Pool size is set via DB_POOL_SIZE env var (default 20).
+    %% init_counter/0 stores it in persistent_term; read the same var here
+    %% to build the child spec list consistently.
+    PoolSize = list_to_integer(os:getenv("DB_POOL_SIZE", "20")),
+
     %% One GenServer per DB connection; writes are distributed via round-robin.
     DBWorkers = [
         #{id      => {service_subscriber_db, I},
@@ -31,7 +36,7 @@ init([]) ->
           shutdown => 5000,
           type    => worker,
           modules => [service_subscriber_db]}
-        || I <- lists:seq(1, 20)
+        || I <- lists:seq(1, PoolSize)
     ],
 
     ChildSpecs = [

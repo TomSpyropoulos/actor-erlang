@@ -18,45 +18,29 @@ The **Service Subscriber** is the core processing component of the IoT data pipe
 
 ## 📨 Message Flow
 
-```
-MQTT broker
-    │
-    ▼
-emqtt client ──publish──► service_subscriber_mqtt (gen_server)
-                                  │
-                          ets:lookup(topic)
-                         ┌────────┴────────┐
-                     [found]           [not found]
-                         │                 │
-                    cast(Pid, Payload)  spawn_and_forward
-                                           │
-                               worker_sup:start_worker(Topic)
-                                           │
-                               service_subscriber_worker:init
-                               ets:insert(topic, self())
-                                           │
-                               handle_cast(Payload)
-                               ├─ json:decode
-                               ├─ fast_parse_timestamp
-                               ├─ prometheus metrics (subscriber latency)
-                               └─ service_subscriber_db:insert (cast, round-robin)
-                                           │
-                               service_subscriber_db pool worker (1..20)
-                                           │
-                               db_backend behaviour dispatch
-                                           │
-                               db_backend_timescaledb:insert
-                               epgsqla:prepared_query (async)
-                                           │
-                                       TimescaleDB
-                                           │
-                                  {DB, Ref, Result} ack
-                                           │
-                               db_backend_timescaledb:handle_result
-                                    {match, Ref}
-                                           │
-                               service_subscriber_db: lookup pending Ref
-                               └─ prometheus metrics (e2e + db write latency)
+```mermaid
+flowchart TD
+    A[MQTT Broker] --> B[emqtt client] --> C[service_subscriber_mqtt]
+    C --> D{ets:lookup topic}
+    D -->|found| E[cast to worker Pid]
+    D -->|not found| F[spawn_and_forward]
+    F --> G[worker_sup:start_worker]
+    G --> H["service_subscriber_worker:init\nets:insert(topic, self())"]
+    E --> I[handle_cast Payload]
+    H --> I
+    I --> J["json:decode + fast_parse_timestamp\nPrometheus: subscriber latency"]
+    J --> K["service_subscriber_db:insert\nround-robin via atomic counter"]
+    K --> L["DB pool worker (1..DB_POOL_SIZE)"]
+    L --> M[db_backend dispatch]
+    M --> N[db_backend_timescaledb:insert]
+    N --> O{BATCH_ENABLED}
+    O -->|false| P["epgsqla:prepared_query async\nRef in pending map\nreturn async NewState"]
+    O -->|true| Q["row buffered in state\nflush on size or timer\nreturn buffered NewState"]
+    P --> R[(TimescaleDB)]
+    Q --> R
+    R --> S[DB Ref ack]
+    S --> T["db_backend_timescaledb:handle_result\nmatch with latency pairs"]
+    T --> U["service_subscriber_db\nrecord latency pairs\nPrometheus: e2e + db_write"]
 ```
 
 ## 🏗️ Architecture
@@ -67,9 +51,9 @@ The application is built around an OTP **Supervision Tree** optimized for massiv
 - **MQTT Client (`service_subscriber_mqtt`)**: A GenServer managing the connection to the Mosquitto broker. It performs extremely fast, lock-free lookups in a shared ETS routing table to route payloads. If a sensor topic is new, it delegates startup asynchronously to avoid blocking the main MQTT loop.
 - **Dynamic Worker Supervisor (`service_subscriber_worker_sup`)**: A supervisor managing the lifecycle of dynamically spawned sensor workers.
 - **Worker Actors (`service_subscriber_worker`)**: Dynamically spawned processes handling JSON decoding, database insert calls, and metrics reporting. They register themselves in the shared ETS table upon initialization.
-- **DB Dispatcher (`service_subscriber_db`)**: A pool of **20** GenServer workers that act as the entry point for all database writes. Writes arrive via `gen_server:cast` and are distributed across the pool using **round-robin** selection via an atomic counter in `persistent_term`. Each dispatcher worker holds a backend module reference and delegates every operation to it — it does not talk to the database directly. Write ordering per individual sensor is not guaranteed by the pool; ordering is enforced at query time via the `Timestamp` column.
-- **DB Backend Behaviour (`db_backend`)**: An Erlang behaviour defining the pluggable interface for database backends. It declares five callbacks — `init/1`, `insert/6`, `insert_status/3`, `handle_result/2`, and `terminate/1` — that any backend must implement. The active backend is selected at startup via the `DB_BACKEND` environment variable, making it straightforward to swap or add backends without touching the dispatcher or worker layers.
-- **TimescaleDB Backend (`db_backend_timescaledb`)**: The concrete implementation of `db_backend` for TimescaleDB (PostgreSQL). SQL statements are prepared once per worker at `init/1` to skip the parse round-trip on every write. Inserts are dispatched asynchronously via `epgsqla:prepared_query/3`; the DB ack arrives as a `{Pid, Ref, Result}` message which `handle_result/2` claims by matching the worker's own `db_pid`, ensuring only acks from this specific connection are consumed. This enables query pipelining and guarantees that DB worker processes never block on database network socket I/O.
+- **DB Dispatcher (`service_subscriber_db`)**: A pool of GenServer workers (size configured via `DB_POOL_SIZE` env var, default 20) that act as the entry point for all database writes. Writes arrive via `gen_server:cast` and are distributed across the pool using **round-robin** selection via an atomic counter in `persistent_term`. Each dispatcher worker holds a backend module reference and delegates every operation to it — it does not talk to the database directly and holds no pending-request map of its own. Write ordering per individual sensor is not guaranteed by the pool; ordering is enforced at query time via the `Timestamp` column.
+- **DB Backend Behaviour (`db_backend`)**: An Erlang behaviour defining the pluggable interface for database backends. It declares five callbacks — `init/1`, `insert/6`, `insert_status/3`, `handle_result/2`, and `terminate/1` — that any backend must implement. `insert/6` returns one of three tagged tuples: `{async, NewState}` for an asynchronously dispatched write, `{buffered, NewState}` when the row was added to an internal buffer with no immediate ack expected, or `{sync, {E2EUs, SubToDbUs}, NewState}` when the write completed inline. `handle_result/2` returns `{match, [{E2EUs, SubToDbUs}], NewState}` with a list of latency pairs (one per acknowledged row) when it recognises the message, or `{no_match, NewState}` otherwise. The active backend is selected at startup via the `DB_BACKEND` environment variable, making it straightforward to swap or add backends without touching the dispatcher or worker layers.
+- **TimescaleDB Backend (`db_backend_timescaledb`)**: The concrete implementation of `db_backend` for TimescaleDB (PostgreSQL). SQL statements are prepared once per worker at `init/1` to skip the parse round-trip on every write. The backend owns its own internal `pending` map keyed by epgsql `Ref`. In **non-batching mode**, each insert is dispatched asynchronously via `epgsqla:prepared_query/3`; the DB ack arrives as a `{Pid, Ref, Result}` message which `handle_result/2` claims by matching the worker's own `db_pid`, looks up the stored timestamps, computes latency, and returns a single-element latency list. In **batching mode** (enabled via `BATCH_ENABLED=true`), rows are buffered in state until the buffer reaches `BATCH_SIZE` or a `BATCH_TIMEOUT_MS` timer fires; on flush a single unnest `INSERT` is sent via `epgsqla:prepared_query/3` using a pre-parsed statement, and `handle_result/2` computes and returns latencies for all rows in the batch at once. This enables query pipelining and guarantees that DB worker processes never block on database network socket I/O.
 - **Metrics Server (`service_subscriber_metrics`)**: A centralized service for declaring and exposing Prometheus metrics.
 
 ## 📊 Metrics Tracking
@@ -103,8 +87,8 @@ The subscriber connects with **QoS 0 (At Most Once)**. This provides fire-and-fo
 1. **[TODO] Quantile Summary Metrics Overhead**
    `prometheus_quantile_summary:observe/2` uses a streaming algorithm backed by ETS. Under high concurrency from many workers, it remains a potential lock-contention point that could be replaced with a `prometheus_histogram` in the future.
 
-2. **[TODO] Write Batching**
-   Each message currently triggers an individual `INSERT`. Buffering rows and flushing as a multi-row `INSERT ... VALUES (...), (...), ...` every N rows or T milliseconds would significantly increase DB throughput.
+2. **[DONE] Write Batching**
+   `db_backend_timescaledb` supports optional row buffering controlled by three environment variables: `BATCH_ENABLED` (default `false`), `BATCH_SIZE` (default `100`), and `BATCH_TIMEOUT_MS` (default `1000`). When enabled, rows are buffered per pool worker and flushed as a single unnest `INSERT` either when the buffer reaches `BATCH_SIZE` or a periodic timer fires — whichever comes first. The unnest statement is pre-parsed once at `init/1` so no per-flush parse round-trip is needed.
 
 3. **[TODO] Investigate Ingestion**
    Right now the backend can handle 10k requests per second but unexpectedly it needs 20 publishers instead of 10, as it seems to cap at half the messages is should be processing (10 subscribers should produce 10k messages/sec but the subscriber stops at 5).

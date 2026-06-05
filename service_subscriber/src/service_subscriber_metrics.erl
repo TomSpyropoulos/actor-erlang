@@ -37,21 +37,11 @@ set_sensor_status(DeviceName, _Missing) ->
 %% --- gen_server callbacks ---
 
 init([]) ->
-    % 1. Register metrics
     prometheus_counter:declare([
         {name, subscriber_requests_total},
         {help, "Total requests processed by the subscriber."}
     ]),
 
-    %% Declare a Prometheus Quantile Summary for tracking latency distribution.
-    %%
-    %% Unlike a standard Histogram (which requires predefined static buckets and calculates
-    %% percentiles on the Prometheus server), a Quantile Summary calculates accurate percentiles
-    %% directly on the client side using a streaming algorithm over a sliding time window.
-    %%
-    %% Note on time units: Because the metric name ends in `_milliseconds`, the Prometheus client
-    %% expects values passed to `observe/2` to be in Erlang's *native* time unit. It will then
-    %% automatically convert the native value to milliseconds when exporting the metrics.
     prometheus_quantile_summary:declare([
         {name, subscriber_request_latency_milliseconds},
         {help, "Latency of requests in milliseconds (Now - Payload Timestamp)."},

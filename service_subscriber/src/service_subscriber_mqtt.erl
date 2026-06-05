@@ -21,39 +21,30 @@
 
 %% --- API Functions ---
 
-%% @doc Starts the MQTT subscriber server.
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %% --- gen_server Callbacks ---
 
-%% @private
-%% @doc Initializes the server state and triggers connection.
 init([]) ->
 	?LOG_INFO("MQTT Subscriber Started"),
 	self() ! connect_mqtt,
 	timer:send_interval(5000, send_heartbeat),
-    % Create a public ETS table for lock-free worker routing
+    %% public + read_concurrency: workers insert their own ETS entry and callers read without locks.
     ets:new(service_subscriber_workers, [set, public, named_table, {read_concurrency, true}]),
     {ok, #state{
 		conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, <<"erlang_subscriber">>}]
     }}.
 
-%% @private
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% @private
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
-%% @private
-%% @doc Handles the 'connect' message to establish connection and subscribe to topics.
-%% Also handles the 'send_heartbeat' message to broadcast heartbeats to all workers.
 handle_info(connect_mqtt, #state{conn_opts = Opts} = State) ->
-    % start and connect client
     {ok, Pid} = emqtt:start_link(Opts),
-    % connect may be synchronous in this client
+    %% emqtt:connect/1 may block; catch avoids crashing the gen_server on transient errors.
     _ = (catch emqtt:connect(Pid)),
     Topic = <<"sensors/#">>,
 
@@ -71,21 +62,15 @@ handle_info(send_heartbeat, State) ->
               end, ok, service_subscriber_workers),
     {noreply, State};
 
-%% @private
-%% @doc Handle incoming publish messages from the MQTT broker.
 handle_info({publish, #{topic := Topic, payload := Payload}}, State) when is_binary(Topic) ->
 	spawn_or_forward(Topic, Payload, State);
 
-%% @private
-%% @doc Handle worker process going down — remove its stale ETS entry.
 handle_info({'DOWN', _Ref, process, Pid, _Reason}, State) ->
     %% Linear scan is acceptable: the table is tiny (one entry per unique sensor topic)
     %% and DOWN events are rare (only on worker crash/stop).
     ets:match_delete(service_subscriber_workers, {'_', Pid}),
     {noreply, State}.
 
-%% @private
-%% @doc Disconnects from MQTT on termination.
 terminate(_Reason, #state{conn_pid = MqttPid}) ->
     case is_pid(MqttPid) of
         true  -> emqtt:disconnect(MqttPid);
@@ -95,8 +80,6 @@ terminate(_Reason, #state{conn_pid = MqttPid}) ->
 
 %% Internal helpers
 
-%% @private
-%% @doc Forwards a payload to an existing worker actor or spawns a new one if necessary.
 spawn_or_forward(Topic, Payload, State) ->
     case ets:lookup(service_subscriber_workers, Topic) of
         [{Topic, Pid}] ->
@@ -109,6 +92,7 @@ spawn_or_forward(Topic, Payload, State) ->
             {noreply, State}
     end.
 
+%% Spawned so supervisor:start_child/2 (potentially slow) doesn't block the mqtt gen_server.
 spawn_and_forward(Topic, Payload) ->
     spawn(fun() ->
         case service_subscriber_worker_sup:start_worker(Topic) of

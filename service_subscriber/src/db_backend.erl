@@ -1,6 +1,6 @@
 %% @doc Behaviour defining the interface for pluggable database write backends.
 %%
-%% The dispatcher (service_subscriber_db) holds a pool of 20 GenServer workers.
+%% The dispatcher (service_subscriber_db) holds a pool of N GenServer workers.
 %% Each worker delegates all DB operations to a backend module that implements
 %% this behaviour. The active backend is selected at runtime via the DB_BACKEND
 %% environment variable (see service_subscriber_db:resolve_backend/0).
@@ -15,24 +15,33 @@
 -callback init(Index :: non_neg_integer()) ->
     {ok, BackendState :: term()}.
 
-%% Submit one sensor-data row. MsgTimestampUs and ProcStartUs are passed
-%% through so the dispatcher can compute e2e and subscriber->DB latencies on
-%% acknowledgement; they are not written to the database.
+%% Submit one sensor-data row.
 %%
-%% Return {async, Ref, NewState} if the write was dispatched asynchronously.
-%% Ref is an opaque correlation token; the dispatcher calls handle_result/2
-%% for every subsequent message until the backend claims that Ref.
+%% MsgTimestampUs and ProcStartUs are passed through so the backend can
+%% compute e2e and subscriber->DB latencies on acknowledgement; they are
+%% not written to the database.
 %%
-%% Return {sync, {E2EUs, SubToDbUs}, NewState} if the write completed inline
-%% and the backend has already measured the latencies itself.
+%% Return {async, NewState} if the write was dispatched asynchronously.
+%% An ack will arrive later as a message to the dispatcher process;
+%% handle_result/2 will be called for every subsequent message until the
+%% backend claims it and returns {match, Latencies, NewState}.
+%%
+%% Return {buffered, NewState} if the row was added to an internal buffer
+%% and no ack is expected yet. The backend will flush the buffer later
+%% (by batch size or timer) and return latencies via handle_result/2 at
+%% that point.
+%%
+%% Return {sync, {E2EUs, SubToDbUs}, NewState} if the write completed
+%% inline and the backend has already measured the latencies itself.
 -callback insert(BackendState    :: term(),
                  DeviceName      :: binary(),
                  Value           :: integer(),
                  Timestamp       :: term(),
                  MsgTimestampUs  :: integer(),
                  ProcStartUs     :: integer()) ->
-    {async, Ref :: reference(), NewBackendState :: term()} |
-    {sync,  {E2EUs :: integer(), SubToDbUs :: integer()}, NewBackendState :: term()}.
+    {async,    NewBackendState :: term()} |
+    {buffered, NewBackendState :: term()} |
+    {sync, {E2EUs :: integer(), SubToDbUs :: integer()}, NewBackendState :: term()}.
 
 %% Submit one sensor-status row. No latency tracking is required here.
 -callback insert_status(BackendState :: term(),
@@ -42,11 +51,13 @@
 
 %% Called by the dispatcher's handle_info/2 for every message the worker
 %% process receives. The backend inspects Message and returns
-%% {match, Ref, NewState} if it recognises it as an async-query result it
-%% owns; the dispatcher then looks up Ref in its pending map to compute
-%% latencies. Unrecognised messages must return {no_match, NewState}.
+%% {match, Latencies, NewState} if it recognises it as an async-query result
+%% it owns, where Latencies is a list of {E2EUs, SubToDbUs} pairs — one per
+%% row that was acknowledged (one for a single insert, N for a batch).
+%% The dispatcher records all latency pairs. Unrecognised messages must
+%% return {no_match, NewState}.
 -callback handle_result(Message :: term(), BackendState :: term()) ->
-    {match,    Ref :: reference(), NewBackendState :: term()} |
+    {match,    [{E2EUs :: integer(), SubToDbUs :: integer()}], NewBackendState :: term()} |
     {no_match, NewBackendState :: term()}.
 
 %% Called when the pool worker is shutting down. Close connections and

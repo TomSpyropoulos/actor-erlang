@@ -23,69 +23,40 @@
 
 %% --- API Functions ---
 
-%% @doc Starts a new worker for a specific sensor topic.
 start_link(Topic) ->
     gen_server:start_link(?MODULE, [Topic], []).
 
 
 %% --- gen_server Callbacks ---
 
-%% @private
 init([Topic]) ->
     ets:insert(service_subscriber_workers, {Topic, self()}),
 	{ok, #state{topic = Topic}}.
 
-%% @private
-%% @doc Handles incoming sensor data (as JSON) forwarded from the MQTT subscriber.
-%% Updates the internal state with the new value and timestamp.
 handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
-	% Decode the JSON payload
 	#{} = Data = json:decode(Msg),
 	<<_/binary>> = DeviceName = maps:get(<<"device_name">>, Data),
 	<<_/binary>> = Timestamp = maps:get(<<"timestamp">>, Data),
 	<<_/binary>> = BinaryValue = maps:get(<<"value">>, Data),
-
-    % Convert the value to an integer for calculation
 	Value = binary_to_integer(BinaryValue),
 
-    % Convert RFC3339 binary to Erlang datetime tuple for epgsql
-    % TIMESTAMPTZ expects {{Year, Month, Day}, {Hour, Minute, Second}} where Second can be a float
+    %% fast_parse_timestamp returns {ErlTimestamp, MsgTimestampUs}.
+    %% ErlTimestamp is the epgsql datetime tuple; ST is microseconds since Unix epoch.
     {ErlTimestamp, ST} = fast_parse_timestamp(Timestamp),
 
-    %% Capture processing-start time before the DB insert so the DB pool can later
-    %% compute subscriber→DB write latency when the async ack arrives.
+    %% Capture now before the DB cast so the backend can later compute sub→DB latency.
     ProcessingStartUs = os:system_time(microsecond),
 
-    % Insert into TimescaleDB
-    % Table: Data (DeviceName TEXT, Value INTEGER, Timestamp TIMESTAMPTZ)
     service_subscriber_db:insert(DeviceName, Value, ErlTimestamp, ST, ProcessingStartUs),
 
-    %% --- Prometheus Metrics Recording ---
-    %% We need to calculate the end-to-end latency of the message.
-    %% This is done by comparing the timestamp embedded in the JSON payload (created by the publisher)
-    %% with the current system time.
-    %%
-    %% 1. Reuse ProcessingStartUs (captured above) — same moment, avoids a redundant syscall.
-    %% 2. `ST` is the payload timestamp, already parsed into microseconds earlier in this function.
-    Now = ProcessingStartUs,
-    RawLatencyUs = Now - ST,
-
-    %% 3. Clock drift between the publisher and subscriber containers could potentially
-    %%    result in a negative latency. We cap the minimum latency at 0 microseconds.
-    LatencyUs = max(0, RawLatencyUs),
-
-    %% 4. The Erlang Prometheus client (`prometheus.erl`) has a built-in time unit conversion feature.
-    %%    If a metric's name ends in a duration unit (like `_milliseconds` or `_seconds`),
-    %%    the library expects the observed value to be in Erlang's *native* time unit,
-    %%    and it automatically converts it to the requested suffix unit before reporting.
-    %%    Therefore, we must convert our microsecond value into native time units here.
+    %% Reuse ProcessingStartUs to avoid a redundant syscall; cap at 0 for clock skew.
+    LatencyUs = max(0, ProcessingStartUs - ST),
+    %% prometheus.erl expects native time units when the metric name ends in _milliseconds.
     NativeLatency = erlang:convert_time_unit(LatencyUs, microsecond, native),
 
-    %% Increment the total request counter and observe the latency for our quantile summary.
     service_subscriber_metrics:inc_requests(),
     service_subscriber_metrics:observe_latency(NativeLatency),
 
-	% Calculate the new total sum
 	TotalSum = case Sum of undefined -> Value; _ -> Value + Sum end,
 
     {noreply, State#state{
@@ -93,11 +64,9 @@ handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
 				 lastSeen = os:system_time(second)
 				}}.
 
-%% @private
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
-%% @private
 handle_info(heartbeat, #state{topic = Topic, lastSeen = LastSeen, lastStatus = LastStatus} = State) ->
     DeviceName = extract_device_name(Topic),
     Now = os:system_time(second),
@@ -125,7 +94,6 @@ handle_info(heartbeat, #state{topic = Topic, lastSeen = LastSeen, lastStatus = L
 
     {noreply, State#state{lastStatus = NewStatus}};
 
-%% @private
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -137,7 +105,6 @@ extract_device_name(Topic) ->
         [Name]    -> Name
     end.
 
-%% @private
 terminate(_Reason, #state{topic = Topic}) ->
     ets:delete(service_subscriber_workers, Topic),
     ok.
@@ -156,6 +123,7 @@ fast_parse_timestamp(<<Y1,Y2,Y3,Y4, $-, Mo1,Mo2, $-, D1,D2, $T, H1,H2, $:, Mi1,M
     ST = UnixSecs * 1000000 + Ms * 1000,
     {ErlTimestamp, ST};
 
+%% Fallback for timestamps that don't match the tight pattern above (e.g. no milliseconds, non-UTC offset).
 fast_parse_timestamp(Timestamp) ->
     ST = calendar:rfc3339_to_system_time(binary_to_list(Timestamp), [{unit, microsecond}]),
     Secs = ST div 1000000,
