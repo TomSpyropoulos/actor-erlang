@@ -81,15 +81,3 @@ The Subscriber implements a heartbeat-based missing sensor detection system:
 ## 📡 MQTT Quality of Service
 
 The subscriber connects with **QoS 0 (At Most Once)**. This provides fire-and-forget delivery with no acknowledgment overhead, prioritizing throughput and low latency over guaranteed delivery.
-
-## 📝 Performance & Bottlenecks Status
-
-1. **[TODO] Quantile Summary Metrics Overhead**
-   `prometheus_quantile_summary:observe/2` uses a streaming algorithm backed by ETS. Under high concurrency from many workers, it remains a potential lock-contention point that could be replaced with a `prometheus_histogram` in the future.
-
-2. **[DONE] Write Batching**
-   `db_backend_timescaledb` supports optional row buffering controlled by three environment variables: `BATCH_ENABLED` (default `false`), `BATCH_SIZE` (default `100`), and `BATCH_TIMEOUT_MS` (default `1000`). When enabled, rows are buffered per pool worker and flushed as a single unnest `INSERT` either when the buffer reaches `BATCH_SIZE` or a periodic timer fires — whichever comes first. The unnest statement is pre-parsed once at `init/1` so no per-flush parse round-trip is needed.
-
-3. **[TODO] Investigate Ingestion**
-   Right now the backend can handle 10k requests per second but unexpectedly it needs 20 publishers instead of 10, as it seems to cap at half the messages is should be processing (10 subscribers should produce 10k messages/sec but the subscriber stops at 5).
-   Also latencies are too low? p999 for 20 publishers is about 5ms. Is this correct? Are latencies reported correctly in prometheus?
