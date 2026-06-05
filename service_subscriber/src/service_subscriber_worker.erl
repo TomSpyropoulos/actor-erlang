@@ -23,16 +23,19 @@
 
 %% --- API Functions ---
 
+%% Starts an unnamed gen_server worker bound to the given MQTT topic.
 start_link(Topic) ->
     gen_server:start_link(?MODULE, [Topic], []).
 
 
 %% --- gen_server Callbacks ---
 
+%% Registers this worker's PID in the shared ETS table so the MQTT handler can route messages to it.
 init([Topic]) ->
     ets:insert(service_subscriber_workers, {Topic, self()}),
 	{ok, #state{topic = Topic}}.
 
+%% Decodes a JSON sensor payload, persists it to the DB, and updates running latency metrics.
 handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
 	#{} = Data = json:decode(Msg),
 	<<_/binary>> = DeviceName = maps:get(<<"device_name">>, Data),
@@ -64,9 +67,11 @@ handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
 				 lastSeen = os:system_time(second)
 				}}.
 
+%% No synchronous calls used; satisfy the callback contract.
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
+%% Evaluates sensor liveness based on time since last message and writes a status row when the state changes.
 handle_info(heartbeat, #state{topic = Topic, lastSeen = LastSeen, lastStatus = LastStatus} = State) ->
     DeviceName = extract_device_name(Topic),
     Now = os:system_time(second),
@@ -94,21 +99,25 @@ handle_info(heartbeat, #state{topic = Topic, lastSeen = LastSeen, lastStatus = L
 
     {noreply, State#state{lastStatus = NewStatus}};
 
+%% Discards unrecognised messages to keep the gen_server running cleanly.
 handle_info(_Info, State) ->
     {noreply, State}.
 
 %% --- Internal helpers ---
 
+%% Strips the leading topic prefix (e.g. "sensors/") to yield just the device name.
 extract_device_name(Topic) ->
     case binary:split(Topic, <<"/">>) of
         [_, Name] -> Name;
         [Name]    -> Name
     end.
 
+%% Removes this worker's ETS entry on shutdown so stale routing entries don't accumulate.
 terminate(_Reason, #state{topic = Topic}) ->
     ets:delete(service_subscriber_workers, Topic),
     ok.
 
+%% Fast path for the canonical ISO-8601 UTC format with millisecond precision, avoiding calendar overhead.
 fast_parse_timestamp(<<Y1,Y2,Y3,Y4, $-, Mo1,Mo2, $-, D1,D2, $T, H1,H2, $:, Mi1,Mi2, $:, S1,S2, $., Ms1,Ms2,Ms3, $Z>>) ->
     Year  = (Y1 - $0) * 1000 + (Y2 - $0) * 100 + (Y3 - $0) * 10 + (Y4 - $0),
     Month = (Mo1 - $0) * 10 + (Mo2 - $0),

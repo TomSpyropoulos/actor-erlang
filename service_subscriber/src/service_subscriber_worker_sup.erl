@@ -8,6 +8,7 @@
 
 -export([start_link/0, start_worker/1, init/1]).
 
+%% Registers the dynamic supervisor locally and starts it under the root supervisor.
 start_link() ->
     ?LOG_INFO("Worker Supervisor Started"),
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
@@ -25,6 +26,7 @@ start_worker(Topic) ->
     },
     supervisor:start_child(?MODULE, ChildSpec).
 
+%% Initialises the supervisor with an empty child list; workers are added at runtime.
 init([]) ->
     SupFlags = #{
         strategy  => one_for_one,

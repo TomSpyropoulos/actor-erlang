@@ -49,6 +49,7 @@
     self_pid           :: pid()
 }).
 
+%% Opens a PostgreSQL connection, pre-parses prepared statements, and configures batching from env vars.
 init(Index) ->
     Host   = os:getenv("DB_HOST",     "timescaledb"),
     User   = os:getenv("DB_USER",     "postgres"),
@@ -108,7 +109,7 @@ init(Index) ->
     end,
     {ok, State2}.
 
-%% Non-batching path: dispatch async and track ref internally.
+%% Sends a single async prepared-query to PostgreSQL and stores the ref for later latency computation.
 insert(#ts_state{batch_enabled = false,
                  db_pid = DB, insert_stmt = Stmt,
                  pending = P} = State,
@@ -118,7 +119,7 @@ insert(#ts_state{batch_enabled = false,
     Ref = epgsqla:prepared_query(DB, Stmt, TypedParams),
     {async, State#ts_state{pending = P#{Ref => {MsgTs, ProcStart}}}};
 
-%% Batching path: buffer the row, flush if batch is full.
+%% Appends the row to the in-memory buffer and flushes immediately when the batch size threshold is reached.
 insert(#ts_state{batch_enabled = true,
                  buffer = Buf, batch_size = BatchSize} = State,
        DeviceName, Value, ErlTimestamp, MsgTs, ProcStart) ->
@@ -138,6 +139,7 @@ insert(#ts_state{batch_enabled = true,
             {buffered, State1}
     end.
 
+%% Fires an async prepared query to record a sensor status change; the ack is intentionally ignored.
 insert_status(#ts_state{db_pid = DB, insert_status_stmt = Stmt} = State,
               DeviceName, Status) ->
     #statement{types = Types} = Stmt,
@@ -145,7 +147,7 @@ insert_status(#ts_state{db_pid = DB, insert_status_stmt = Stmt} = State,
     epgsqla:prepared_query(DB, Stmt, TypedParams),
     {ok, State}.
 
-%% Timer-triggered flush.
+%% Flushes any buffered rows when the timeout fires and reschedules the next flush timer.
 handle_result(flush_batch, #ts_state{batch_enabled = true,
                                       buffer = Buf} = State) ->
     State1 = State#ts_state{timer_ref = undefined},
@@ -156,7 +158,7 @@ handle_result(flush_batch, #ts_state{batch_enabled = true,
     %% Reschedule for the next interval.
     {no_match, schedule_timer(State2)};
 
-%% DB ack — claimed by matching our own db_pid.
+%% Claims a PostgreSQL ack matched by ref and computes latencies for each row in the pending map.
 handle_result({DB, Ref, _Result},
               #ts_state{db_pid = DB, pending = P} = State) when is_reference(Ref) ->
     case maps:take(Ref, P) of
@@ -175,19 +177,18 @@ handle_result({DB, Ref, _Result},
             {no_match, State}
     end;
 
+%% Passes through messages not owned by this backend without modifying state.
 handle_result(_Msg, State) ->
     {no_match, State}.
 
+%% Closes the PostgreSQL connection cleanly when the pool worker shuts down.
 terminate(#ts_state{db_pid = DB}) ->
     epgsql:close(DB),
     ok.
 
 %% --- Internal helpers ---
 
-%% Flush the current buffer as a single unnest INSERT using the pre-parsed
-%% batch statement. Rows are stored in reverse-prepend order so we reverse
-%% before sending. Three parallel arrays (names, values, timestamps) are
-%% built and passed as typed parameters to epgsqla:prepared_query/3.
+%% Sends the entire buffer as a single unnest INSERT and registers the batch ref for latency tracking.
 flush(#ts_state{db_pid = DB, batch_insert_stmt = Stmt,
                 buffer = Buf, pending = P} = State) ->
     Rows = lists:reverse(Buf),
@@ -203,12 +204,12 @@ flush(#ts_state{db_pid = DB, batch_insert_stmt = Stmt,
         pending   = P#{Ref => {batch, Rows}}
     }.
 
-%% Schedule a flush_batch message to self_pid after batch_timeout_ms.
-%% Only schedules if no timer is already in flight.
+%% Arms a one-shot timer to flush the buffer after batch_timeout_ms if no timer is already running.
 schedule_timer(#ts_state{timer_ref = undefined,
                           batch_timeout_ms = Ms,
                           self_pid = Pid} = State) ->
     Ref = erlang:send_after(Ms, Pid, flush_batch),
     State#ts_state{timer_ref = Ref};
+%% Returns state unchanged when a timer is already in flight to avoid double-scheduling.
 schedule_timer(State) ->
     State.

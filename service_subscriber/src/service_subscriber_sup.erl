@@ -10,10 +10,12 @@
 
 -define(SERVER, ?MODULE).
 
+%% Registers the supervisor locally and starts it under the OTP application.
 start_link() ->
     ?LOG_INFO("Subscriber Supervisor Started"),
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
+%% Builds child specs for metrics, worker supervisor, DB pool, and MQTT client in dependency order.
 init([]) ->
     SupFlags = #{
         strategy  => one_for_one,

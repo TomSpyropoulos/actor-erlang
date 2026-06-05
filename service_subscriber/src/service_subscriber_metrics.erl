@@ -12,30 +12,36 @@
 
 %% --- API ---
 
+%% Starts the metrics gen_server and registers it locally so API functions can reach it.
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
+%% Increments the total message counter by one for each processed sensor payload.
 inc_requests() ->
     prometheus_counter:inc(subscriber_requests_total).
 
+%% Records the subscriber-receive-to-now latency for the payload-timestamp summary.
 observe_latency(Latency) ->
     prometheus_quantile_summary:observe(subscriber_request_latency_milliseconds, Latency).
 
+%% Records the end-to-end latency from payload timestamp to DB acknowledgement.
 observe_e2e_latency(Latency) ->
     prometheus_quantile_summary:observe(subscriber_e2e_latency_milliseconds, Latency).
 
+%% Records the time elapsed between subscriber receive and DB write acknowledgement.
 observe_db_write_latency(Latency) ->
     prometheus_quantile_summary:observe(subscriber_db_write_latency_milliseconds, Latency).
 
-%% @doc Records the current liveness of a sensor as a gauge (1 = ALIVE, 0 = MISSING).
-%% Called on every heartbeat so the gauge always reflects the current state.
+%% Updates the per-device liveness gauge to 1 (ALIVE) or 0 (MISSING) on every heartbeat.
 set_sensor_status(DeviceName, <<"ALIVE">>) ->
     prometheus_gauge:set(subscriber_sensor_up, [DeviceName], 1);
+%% Sets the liveness gauge to 0 for any status value other than ALIVE.
 set_sensor_status(DeviceName, _Missing) ->
     prometheus_gauge:set(subscriber_sensor_up, [DeviceName], 0).
 
 %% --- gen_server callbacks ---
 
+%% Declares all Prometheus metrics at startup so they exist before any observation arrives.
 init([]) ->
     prometheus_counter:declare([
         {name, subscriber_requests_total},
@@ -71,14 +77,18 @@ init([]) ->
 
     {ok, #{}}.
 
+%% No synchronous calls used; satisfy the callback contract.
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
+%% No casts used; satisfy the callback contract.
 handle_cast(_Request, State) ->
     {noreply, State}.
 
+%% No out-of-band messages expected; satisfy the callback contract.
 handle_info(_Info, State) ->
     {noreply, State}.
 
+%% Nothing to clean up on shutdown; Prometheus metrics live in the registry process.
 terminate(_Reason, _State) ->
     ok.

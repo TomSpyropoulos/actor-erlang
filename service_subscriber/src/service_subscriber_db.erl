@@ -24,12 +24,12 @@
     backend_state :: term()
 }).
 
+%% Starts a named DB dispatcher gen_server for the given pool index.
 start_link(Index) ->
     Name = worker_name(Index),
     gen_server:start_link({local, Name}, ?MODULE, [Index], []).
 
-%% Initialise the atomic round-robin counter and store pool size.
-%% Must be called before any insert.
+%% Initialises the atomic round-robin counter and stores pool size in persistent_term before any inserts.
 init_counter() ->
     PoolSize = list_to_integer(os:getenv("DB_POOL_SIZE", "20")),
     Ref = atomics:new(1, [{signed, false}]),
@@ -45,14 +45,17 @@ insert(DeviceName, Value, ErlTimestamp, MsgTimestampUs, ProcessingStartUs) ->
 insert_status(DeviceName, Status) ->
     gen_server:cast(worker_name(next_index()), {insert_status, DeviceName, Status}).
 
+%% Resolves the configured backend module and delegates initialisation to it.
 init([Index]) ->
     BackendMod = resolve_backend(),
     {ok, BackendState} = BackendMod:init(Index),
     {ok, #state{backend_mod = BackendMod, backend_state = BackendState}}.
 
+%% No synchronous calls used; satisfy the callback contract.
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
+%% Routes an async sensor-data insert to the backend and records latencies if the write was synchronous.
 handle_cast({insert, DeviceName, Value, ErlTs, MsgTs, ProcStart},
             #state{backend_mod = Mod, backend_state = BS} = S) ->
     case Mod:insert(BS, DeviceName, Value, ErlTs, MsgTs, ProcStart) of
@@ -63,16 +66,17 @@ handle_cast({insert, DeviceName, Value, ErlTs, MsgTs, ProcStart},
             {noreply, S#state{backend_state = NewBS}}
     end;
 
+%% Routes an async sensor-status insert to the backend.
 handle_cast({insert_status, DeviceName, Status},
             #state{backend_mod = Mod, backend_state = BS} = S) ->
     {ok, NewBS} = Mod:insert_status(BS, DeviceName, Status),
     {noreply, S#state{backend_state = NewBS}};
 
+%% Discards unrecognised casts to keep the gen_server running cleanly.
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% Route every incoming message through the backend. On a claimed ack the
-%% backend returns a list of {E2E, Sub} latency pairs — one per row.
+%% Forwards every incoming message to the backend and records any returned latency pairs.
 handle_info(Msg, #state{backend_mod = Mod, backend_state = BS} = S) ->
     case Mod:handle_result(Msg, BS) of
         {match, Latencies, NewBS} ->
@@ -82,28 +86,31 @@ handle_info(Msg, #state{backend_mod = Mod, backend_state = BS} = S) ->
             {noreply, S#state{backend_state = NewBS}}
     end.
 
+%% Delegates shutdown cleanup to the backend so it can close the DB connection gracefully.
 terminate(_Reason, #state{backend_mod = Mod, backend_state = BS}) ->
     Mod:terminate(BS).
 
 %% --- Internal helpers ---
 
+%% Converts a numeric pool index to the registered atom name for that worker.
 worker_name(Index) ->
     list_to_atom("service_subscriber_db_" ++ integer_to_list(Index)).
 
+%% Returns the next 1-based pool index using a lock-free atomic round-robin counter.
 next_index() ->
     Ref      = persistent_term:get(?COUNTER_KEY),
     PoolSize = persistent_term:get(?POOL_SIZE_KEY),
     N = atomics:add_get(Ref, 1, 1),
     ((N - 1) rem PoolSize) + 1.
 
+%% Reads DB_BACKEND from the environment and returns the corresponding backend module atom.
 resolve_backend() ->
     case os:getenv("DB_BACKEND", "timescaledb") of
         "timescaledb" -> db_backend_timescaledb;
         Unknown       -> error({unknown_db_backend, Unknown})
     end.
 
-%% Converts microsecond durations to native time units before recording;
-%% the Prometheus summary expects native units for accurate quantile tracking.
+%% Converts microsecond latency pairs to native time units and forwards them to the Prometheus summaries.
 record_latencies(E2EUs, SubToDbUs) ->
     service_subscriber_metrics:observe_e2e_latency(
         erlang:convert_time_unit(E2EUs, microsecond, native)),
