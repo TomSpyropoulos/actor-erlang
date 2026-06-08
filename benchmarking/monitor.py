@@ -5,6 +5,7 @@ stats and saves every raw sample to JSON for later analysis/plotting."""
 
 import argparse
 import json
+import math
 import time
 import urllib.request
 from collections import defaultdict
@@ -86,15 +87,22 @@ def poll_loop(base_url, interval, started_at):
 
 
 def compute_aggregates(samples):
-    """Compute avg/max across the run for every distinct panel+series combination."""
+    """Compute avg/max across the run for every distinct panel+series combination, skipping
+    NaN samples (Prometheus summaries report NaN before their first observation, e.g. during
+    pipeline warm-up — including them would poison sum()/max() for the whole run with NaN)."""
     series_values = defaultdict(list)
-    # Group every sample's numeric values by which panel and label-series they belong to.
+    # Group every sample's non-NaN numeric values by which panel and label-series they belong to.
     for sample in samples:
         for panel_name, series in sample["panels"].items():
             for series_label, value in series.items():
-                series_values[f"{panel_name} / {series_label}"].append(value)
-    # Reduce each group's collected values down to its avg/max.
-    return {key: {"avg": sum(values) / len(values), "max": max(values)} for key, values in series_values.items()}
+                if not math.isnan(value):
+                    series_values[f"{panel_name} / {series_label}"].append(value)
+    # Reduce each group's collected values down to its avg/max; series with no real
+    # observations yet (still all-NaN) are omitted rather than reported as NaN/NaN.
+    return {
+        key: {"avg": sum(values) / len(values), "max": max(values)}
+        for key, values in series_values.items() if values
+    }
 
 
 def format_elapsed(seconds):
@@ -127,9 +135,11 @@ def render_table(sample):
 
     panels = sample["panels"]
 
-    # Render a numeric value with an optional unit suffix, or "?" while data is missing.
+    # Render a numeric value with an optional unit suffix, or "?" while data is missing —
+    # either the series doesn't exist yet (None) or it's a summary with no observations
+    # yet (NaN, e.g. before the first DB write completes during pipeline warm-up).
     def fmt(value, suffix=""):
-        return "?" if value is None else f"{value:.1f}{suffix}"
+        return "?" if value is None or math.isnan(value) else f"{value:.1f}{suffix}"
 
     table.add_row(
         datetime.fromisoformat(sample["timestamp"]).strftime("%H:%M:%S"),
