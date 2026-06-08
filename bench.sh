@@ -5,18 +5,31 @@ SCENARIO="${1:?Usage: $0 <scenario-file>}"
 [[ -f "$SCENARIO" ]] || { echo "scenario file not found: $SCENARIO" >&2; exit 1; }
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
+BENCH_DIR="$REPO/benchmarking"
+VENV_DIR="$BENCH_DIR/.venv"
+
 set -a; source "$SCENARIO"; set +a
 
 PUBLISHER_COUNT="${PUBLISHER_COUNT:-1}"
 METRICS_INTERVAL="${METRICS_INTERVAL:-10}"
 
+# Create the monitor's venv and install its dependencies on first run only.
+ensure_venv() {
+    if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+        echo "Setting up Python environment..."
+        python3 -m venv "$VENV_DIR"
+        "$VENV_DIR/bin/pip" install --quiet -r "$BENCH_DIR/requirements.txt"
+    fi
+}
+
+# Tear down the docker stack. Runs exactly once on every exit path (success, error,
+# or Ctrl+C) via the EXIT trap below — bash itself never races monitor.py for SIGINT.
 cleanup() {
     echo ""
     echo "Stopping stack..."
-    docker compose -f "$REPO/docker-compose.yaml" down -v > /dev/null 2>&1
-    exit 0
+    docker compose -f "$REPO/docker-compose.yaml" down -v > /dev/null 2>&1 || true
 }
-trap cleanup INT TERM
+trap cleanup EXIT
 
 echo "=== Benchmark: $(basename "$SCENARIO") ==="
 echo "  Publishers  : $PUBLISHER_COUNT  (~$((PUBLISHER_COUNT * 1000)) msg/s)"
@@ -31,34 +44,17 @@ docker compose -f "$REPO/docker-compose.yaml" --env-file "$SCENARIO" up --build 
 
 echo "Waiting for subscriber metrics endpoint..."
 until curl -sf http://localhost:8081/metrics > /dev/null 2>&1; do sleep 1; done
-echo "Ready. Polling every ${METRICS_INTERVAL}s. Press Ctrl+C to stop."
+
+ensure_venv
+
+echo "Ready. Launching live metrics view (Ctrl+C to stop)..."
 echo ""
-printf "%-10s  %-10s  %-10s  %-10s  %-10s  %-10s\n" \
-    "time" "total" "rate/s" "e2e p50" "e2e p99" "db p50"
-printf '%s\n' "----------  ----------  ----------  ----------  ----------  ----------"
-
-prev_total=0
-while true; do
-    sleep "$METRICS_INTERVAL"
-    raw=$(curl -s http://localhost:8081/metrics 2>/dev/null) || continue
-
-    # Handle both integer (Erlang) and float (Scala) counter formats
-    total=$(printf '%s\n' "$raw" | grep '^subscriber_requests_total' \
-            | awk '{printf "%d", $2}')
-    e2e_p50=$(printf '%s\n' "$raw" \
-            | grep 'e2e_latency_milliseconds{quantile="0.5"' \
-            | awk '{printf "%.1f ms", $2}')
-    e2e_p99=$(printf '%s\n' "$raw" \
-            | grep 'e2e_latency_milliseconds{quantile="0.99"' \
-            | awk '{printf "%.1f ms", $2}')
-    db_p50=$(printf '%s\n' "$raw" \
-            | grep 'db_write_latency_milliseconds{quantile="0.5"' \
-            | awk '{printf "%.1f ms", $2}')
-
-    rate=$(( (total - prev_total) / METRICS_INTERVAL ))
-    prev_total=$total
-
-    printf "%-10s  %-10s  %-10s  %-10s  %-10s  %-10s\n" \
-        "$(date +%H:%M:%S)" "$total" "$rate" \
-        "${e2e_p50:-?}" "${e2e_p99:-?}" "${db_p50:-?}"
-done
+# Runs in the foreground so Ctrl+C goes straight to monitor.py — it is the sole
+# handler of the interrupt and decides when polling stops, prints its summary, and
+# saves results; `|| true` keeps `set -e` from short-circuiting before the EXIT
+# trap's cleanup runs once monitor.py returns.
+"$VENV_DIR/bin/python" "$BENCH_DIR/monitor.py" \
+    --prometheus-url "http://localhost:9090" \
+    --interval "$METRICS_INTERVAL" \
+    --scenario-name "$(basename "$SCENARIO")" \
+    --output-dir "$BENCH_DIR/output" || true

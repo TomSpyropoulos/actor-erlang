@@ -48,7 +48,9 @@ The subscriber's DB write path is decoupled from any specific database through a
 
 ### How `bench.sh` works
 
-`bench.sh` takes a scenario file, sources it as environment variables, starts the full Docker Compose stack with the configured number of publisher instances, then polls the subscriber's Prometheus endpoint every 10 seconds and prints a live metrics table until you press `Ctrl+C`, which triggers a clean `docker compose down`.
+`bench.sh` takes a scenario file, sources it as environment variables, starts the full Docker Compose stack with the configured number of publisher instances, and waits for the subscriber's Prometheus endpoint to come up. It then sets up a Python virtual environment under `benchmarking/.venv` (installing `benchmarking/requirements.txt` automatically on first run — no manual setup needed) and hands off to `benchmarking/monitor.py`.
+
+`monitor.py` queries Prometheus directly for the same panels shown on the "Container Monitoring" Grafana dashboard (message rate, the three latency summaries, sensor liveness, container CPU/memory) every `METRICS_INTERVAL` seconds (default: 10) and renders them as a live-updating table. Press `Ctrl+C` to stop: it prints an avg/max summary of the run and saves every raw, timestamped sample to a JSON file under `benchmarking/output/` — so you can revisit or replot a run's data later without re-running the (slow) benchmark. `bench.sh` then runs a clean `docker compose down -v`.
 
 ```
 === Benchmark: timescale_batch.env ===
@@ -57,10 +59,10 @@ The subscriber's DB write path is decoupled from any specific database through a
   DB pool     : 5 workers
   Backend     : timescaledb
 
-time        total       rate/s      e2e p50    e2e p99    db p50
-----------  ----------  ----------  ----------  ----------  ----------
-14:22:01    12450       1245        28.3 ms     54.1 ms     27.1 ms
-14:22:11    24901       2445        27.9 ms     53.8 ms     26.8 ms
+                     Live benchmark metrics
+  time      msgs/s  req p50  req p99  e2e p50  e2e p99  db p50  db p99  sensors up/down  cpu (cores)  mem (MB)
+ 14:22:01    1245    12.1 ms  39.8 ms  28.3 ms  54.1 ms  27.1 ms  32.9 ms      3 / 0          0.06        180.4
+ 14:22:11    2445    12.3 ms  40.1 ms  27.9 ms  53.8 ms  26.8 ms  33.1 ms      3 / 0          0.07        184.9
 ```
 
 To override the poll interval, set `METRICS_INTERVAL=5` in your scenario file.
@@ -69,7 +71,7 @@ To override the poll interval, set `METRICS_INTERVAL=5` in your scenario file.
 
 ```bash
 chmod +x bench.sh
-./bench.sh scenarios/timescale.env
+./bench.sh benchmarking/scenarios/timescale.env
 ```
 
 Press `Ctrl+C` to stop the stack when done.
@@ -78,10 +80,10 @@ Press `Ctrl+C` to stop the stack when done.
 
 | File | Publishers | Batch | DB pool | Load |
 |------|-----------|-------|---------|------|
-| `scenarios/timescale.env` | 5 | off | 20 | ~5k msg/s baseline |
-| `scenarios/timescale_batch.env` | 5 | on (100 rows, 1s) | 5 | ~5k msg/s with batching |
-| `scenarios/timescale_stress.env` | 20 | off | 20 | ~20k msg/s stress |
-| `scenarios/timescale_batch_stress.env` | 20 | on (100 rows, 0.5s) | 5 | ~20k msg/s with batching |
+| `benchmarking/scenarios/timescale.env` | 5 | off | 20 | ~5k msg/s baseline |
+| `benchmarking/scenarios/timescale_batch.env` | 5 | on (100 rows, 1s) | 5 | ~5k msg/s with batching |
+| `benchmarking/scenarios/timescale_stress.env` | 20 | off | 20 | ~20k msg/s stress |
+| `benchmarking/scenarios/timescale_batch_stress.env` | 20 | on (100 rows, 0.5s) | 5 | ~20k msg/s with batching |
 
 ### Scenario variables reference
 

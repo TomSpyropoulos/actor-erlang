@@ -1,2 +1,5 @@
 mosquitto/data/
 prometheus/data/
+benchmarking/.venv/
+benchmarking/__pycache__/
+benchmarking/output/*.json
