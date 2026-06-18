@@ -45,6 +45,8 @@
     batch_timeout_ms   :: integer(),
     %% Buffer: list of {DeviceName, Value, ErlTimestamp, MsgTs, ProcStart}
     buffer             :: list(),
+    %% Row count in `buffer`, tracked separately to avoid an O(n) length/1 scan on every insert
+    buffer_count       :: non_neg_integer(),
     timer_ref          :: reference() | undefined,
     self_pid           :: pid()
 }).
@@ -98,6 +100,7 @@ init(Index) ->
         batch_size         = BatchSize,
         batch_timeout_ms   = BatchTimeMs,
         buffer             = [],
+        buffer_count       = 0,
         timer_ref          = undefined,
         self_pid           = SelfPid
     },
@@ -120,18 +123,20 @@ insert(#ts_state{batch_enabled = false,
     {async, State#ts_state{pending = P#{Ref => {MsgTs, ProcStart}}}};
 
 %% Appends the row to the in-memory buffer and flushes immediately when the batch size threshold is reached.
+%% Uses a tracked counter instead of length/1 so the check stays O(1) regardless of batch size.
 insert(#ts_state{batch_enabled = true,
-                 buffer = Buf, batch_size = BatchSize} = State,
+                 buffer = Buf, buffer_count = Count, batch_size = BatchSize} = State,
        DeviceName, Value, ErlTimestamp, MsgTs, ProcStart) ->
     Row = {DeviceName, Value, ErlTimestamp, MsgTs, ProcStart},
     NewBuf = [Row | Buf],
-    State1 = State#ts_state{buffer = NewBuf},
+    NewCount = Count + 1,
+    State1 = State#ts_state{buffer = NewBuf, buffer_count = NewCount},
     if
-        length(NewBuf) >= BatchSize ->
+        NewCount >= BatchSize ->
             %% Batch full — flush immediately.
             State2 = flush(State1),
             {async, State2};
-        length(NewBuf) =:= 1 ->
+        NewCount =:= 1 ->
             %% First row in a new batch — ensure timer is running.
             State2 = schedule_timer(State1),
             {buffered, State2};
@@ -199,9 +204,10 @@ flush(#ts_state{db_pid = DB, batch_insert_stmt = Stmt,
     TypedParams = lists:zip(Types, [Names, Values, Timestamps]),
     Ref = epgsqla:prepared_query(DB, Stmt, TypedParams),
     State#ts_state{
-        buffer    = [],
-        timer_ref = undefined,
-        pending   = P#{Ref => {batch, Rows}}
+        buffer       = [],
+        buffer_count = 0,
+        timer_ref    = undefined,
+        pending      = P#{Ref => {batch, Rows}}
     }.
 
 %% Arms a one-shot timer to flush the buffer after batch_timeout_ms if no timer is already running.

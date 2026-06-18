@@ -84,6 +84,12 @@ Press `Ctrl+C` to stop the stack when done.
 | `benchmarking/scenarios/timescale_batch.env` | 5 | on (100 rows, 1s) | 5 | ~5k msg/s with batching |
 | `benchmarking/scenarios/timescale_stress.env` | 20 | off | 20 | ~20k msg/s stress |
 | `benchmarking/scenarios/timescale_batch_stress.env` | 20 | on (100 rows, 0.5s) | 5 | ~20k msg/s with batching |
+| `benchmarking/scenarios/timescale_batch_size_20.env` | 5 | on (20 rows, 1s) | 5 | batch size sweep — small batches |
+| `benchmarking/scenarios/timescale_batch_size_500.env` | 5 | on (500 rows, 1s) | 5 | batch size sweep — large batches |
+| `benchmarking/scenarios/timescale_pool_5.env` | 5 | off | 5 | DB pool sweep — small pool |
+| `benchmarking/scenarios/timescale_pool_50.env` | 5 | off | 50 | DB pool sweep — large pool |
+| `benchmarking/scenarios/timescale_payload_1kb.env` | 5 | off | 20 | payload size sweep — 1KB padding |
+| `benchmarking/scenarios/timescale_payload_10kb.env` | 5 | off | 20 | payload size sweep — 10KB padding |
 
 ### Scenario variables reference
 
@@ -95,6 +101,7 @@ Press `Ctrl+C` to stop the stack when done.
 | `BATCH_ENABLED` | `false` | Enable row buffering |
 | `BATCH_SIZE` | `100` | Flush when buffer reaches this many rows |
 | `BATCH_TIMEOUT_MS` | `1000` | Flush after this many ms even if buffer is not full |
+| `PAYLOAD_PADDING_BYTES` | `0` | Extra filler bytes added as a `"padding"` field in each publisher's JSON payload, for payload-size benchmarks |
 | `METRICS_INTERVAL` | `10` | Seconds between metric snapshots in the bench output |
 
 ### Supported `DB_BACKEND` values

@@ -110,6 +110,8 @@ services:
   publisher:
     build: ./service_publisher
     restart: unless-stopped
+    environment:
+      PAYLOAD_PADDING_BYTES: ${PAYLOAD_PADDING_BYTES:-0}
     depends_on:
       mosquitto:
         condition: service_healthy
