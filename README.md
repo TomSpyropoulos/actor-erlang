@@ -11,6 +11,7 @@ The system consists of the following components:
 3.  **Service Subscriber**: An Erlang application that consumes messages from the `sensors/#` wildcard topic. It dynamically creates a dedicated **Worker Actor** (GenServer) for each unique sensor topic to maintain state (running sum and last timestamp) while tracking metrics. Features an ultra-fast lock-free ETS-based dynamic actor routing table and a parallel DB connection pool. The write path is pluggable: the active backend is selected at runtime via `DB_BACKEND`. See [service_subscriber/](service_subscriber/) for more details.
 4.  **Prometheus**: Scrapes metrics from the containers and the host system.
 5.  **Grafana**: Provides a visual dashboard for monitoring container resource usage (CPU/RAM) and application latency.
+6.  **TimescaleDB**: A PostgreSQL extension for high-performance time-series data storage.
 
 ## 🚀 Getting Started
 
@@ -65,31 +66,38 @@ The subscriber's DB write path is decoupled from any specific database through a
  14:22:11    2445    12.3 ms  40.1 ms  27.9 ms  53.8 ms  26.8 ms  33.1 ms      3 / 0          0.07        184.9
 ```
 
-To override the poll interval, set `METRICS_INTERVAL=5` in your scenario file.
+**Single vs. batch mode.** `bench.sh <scenario>` runs one scenario interactively (stop with `Ctrl+C`). Set `RUN_DURATION` to run it unattended for a fixed number of seconds instead. `bench.sh all` sweeps **every** scenario in `benchmarking/scenarios/` back-to-back: it builds the images once up front, runs each for `RUN_DURATION` seconds (default `60`), writes one JSON per scenario to `benchmarking/output/`, and tears the stack down (`docker compose down -v`) between runs so each starts cold.
+
+To override the poll interval, set `METRICS_INTERVAL` in your scenario file or environment (defaults: `5`s in duration mode, `10`s interactive).
 
 ### Running a scenario
 
 ```bash
 chmod +x bench.sh
-./bench.sh benchmarking/scenarios/timescale.env
-```
 
-Press `Ctrl+C` to stop the stack when done.
+# One scenario, interactively (Ctrl+C to stop):
+./bench.sh benchmarking/scenarios/timescale_load_p20.env
+
+# One scenario, fixed 60s unattended run:
+RUN_DURATION=60 ./bench.sh benchmarking/scenarios/timescale_load_p20.env
+
+# The full OFAT sweep (all 24 scenarios, 60s each, unattended):
+./bench.sh all
+```
 
 ### Available scenarios
 
-| File | Publishers | Batch | DB pool | Load |
-|------|-----------|-------|---------|------|
-| `benchmarking/scenarios/timescale.env` | 5 | off | 20 | ~5k msg/s baseline |
-| `benchmarking/scenarios/timescale_batch.env` | 5 | on (100 rows, 1s) | 5 | ~5k msg/s with batching |
-| `benchmarking/scenarios/timescale_stress.env` | 20 | off | 20 | ~20k msg/s stress |
-| `benchmarking/scenarios/timescale_batch_stress.env` | 20 | on (100 rows, 0.5s) | 5 | ~20k msg/s with batching |
-| `benchmarking/scenarios/timescale_batch_size_20.env` | 5 | on (20 rows, 1s) | 5 | batch size sweep — small batches |
-| `benchmarking/scenarios/timescale_batch_size_500.env` | 5 | on (500 rows, 1s) | 5 | batch size sweep — large batches |
-| `benchmarking/scenarios/timescale_pool_5.env` | 5 | off | 5 | DB pool sweep — small pool |
-| `benchmarking/scenarios/timescale_pool_50.env` | 5 | off | 50 | DB pool sweep — large pool |
-| `benchmarking/scenarios/timescale_payload_1kb.env` | 5 | off | 20 | payload size sweep — 1KB padding |
-| `benchmarking/scenarios/timescale_payload_10kb.env` | 5 | off | 20 | payload size sweep — 10KB padding |
+All 24 scenarios follow a **one-factor-at-a-time (OFAT)** design: every file changes exactly one variable from a shared **anchor** (`20` publishers ≈ 20k msg/s, pool `20`, batching off, no payload padding), so any measured effect is attributable to that one factor. The batch scenarios share a **batch sub-anchor** (batching on, size `100`, timeout `500`ms) that differs from the anchor only by enabling batching.
+
+| Group | File pattern | Factor swept | Values (**bold** = anchor) |
+|-------|--------------|--------------|----------------------------|
+| Load | `timescale_load_p{NN}.env` | `PUBLISHER_COUNT` | 4, 8, 16, **20**, 32, 48, 64 |
+| Pool | `timescale_pool_{NN}.env` | `DB_POOL_SIZE` | 5, 10, **20**, 50 |
+| Payload | `timescale_payload_{N}.env` | `PAYLOAD_PADDING_BYTES` | **0**, 256, 1KB, 10KB |
+| Batch size | `timescale_batchsize_{NNN}.env` | `BATCH_SIZE` (batch on) | 20, 50, **100**, 200, 500 |
+| Batch timeout | `timescale_batchto_{NNNN}.env` | `BATCH_TIMEOUT_MS` (batch on) | 50, 200, **500**, 1000 |
+
+The no-batch-vs-batch comparison is the anchor (`timescale_load_p20.env`) versus the batch sub-anchor (`timescale_batchsize_100.env`, identical to `timescale_batchto_0500.env`).
 
 ### Scenario variables reference
 
@@ -102,13 +110,20 @@ Press `Ctrl+C` to stop the stack when done.
 | `BATCH_SIZE` | `100` | Flush when buffer reaches this many rows |
 | `BATCH_TIMEOUT_MS` | `1000` | Flush after this many ms even if buffer is not full |
 | `PAYLOAD_PADDING_BYTES` | `0` | Extra filler bytes added as a `"padding"` field in each publisher's JSON payload, for payload-size benchmarks |
-| `METRICS_INTERVAL` | `10` | Seconds between metric snapshots in the bench output |
+| `RUN_DURATION` | _(unset)_ | Fixed measurement window in seconds. Set it (or use `bench.sh all`, which defaults it to `60`) for an unattended run; leave unset for an interactive `Ctrl+C` run |
+| `METRICS_INTERVAL` | `5` / `10` | Seconds between metric snapshots (defaults to `5` in duration mode, `10` interactive) |
 
 ### Supported `DB_BACKEND` values
 
 | Value | Module | Description |
 |-------|--------|-------------|
 | `timescaledb` (default) | `db_backend_timescaledb` | PostgreSQL/TimescaleDB via epgsql, async writes |
+
+### TODO / Planned
+
+- **Warm-up analysis** — runs currently measure from `t=0` including startup. Retain the per-interval time series and analyse the startup transient (latency-vs-time, time-to-steady-state — the JVM ramp vs. BEAM's flat start) separately from the steady-state plateau, rather than folding both into one aggregate.
+- **Repetitions (K=3)** — run each scenario 3× with a full teardown between reps and report mean ± stdev, so a runtime difference can be told apart from run-to-run noise. Pilot the spread on one scenario first to confirm K. (Needs a rep tag in `monitor.py`'s output filename and a rep loop in `bench.sh`.)
+- **Post-run report** — after a full sweep, aggregate the per-scenario JSON into a **CSV** (one row per runtime × scenario) and write a **Markdown** report (load-saturation curves, OFAT plots, batch crossover, interpretation) for lifting into the thesis. Excel only as an optional throwaway export.
 
 ## 🧠 Deep Dive: Erlang Concurrency
 

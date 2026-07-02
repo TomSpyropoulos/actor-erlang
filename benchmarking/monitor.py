@@ -27,11 +27,12 @@ console = Console()
 # dragging along cAdvisor's ~30 incidental docker-compose labels. This list is the single
 # source of truth for what gets watched, displayed, and saved — update it here if the
 # dashboard's panels ever change. Grafana's `$__rate_interval` is replaced with a fixed
-# `1m`, matching the dashboard's other hardcoded rate ranges.
+# `15s` rate window: at Prometheus' 2s scrape interval that spans ~7 samples (stable) yet
+# reaches a full window in 15s, so throughput/CPU settle far sooner than a `1m` window's 60s.
 PANELS = [
-    ("container_cpu_usage", 'rate(container_cpu_usage_seconds_total{name!=""}[1m])', "name"),
-    ("container_memory_usage_mb", 'rate(container_memory_usage_bytes{name!=""}[1m]) / 1024 / 1024', "name"),
-    ("messages_per_second", "sum(rate(subscriber_requests_total[1m]))", None),
+    ("container_cpu_usage", 'rate(container_cpu_usage_seconds_total{name!=""}[15s])', "name"),
+    ("container_memory_usage_mb", 'rate(container_memory_usage_bytes{name!=""}[15s]) / 1024 / 1024', "name"),
+    ("messages_per_second", "sum(rate(subscriber_requests_total[15s]))", None),
     ("publisher_subscriber_latency_ms", "subscriber_request_latency_milliseconds", "quantile"),
     ("publisher_db_e2e_latency_ms", "subscriber_e2e_latency_milliseconds", "quantile"),
     ("sensors_alive", "sum(subscriber_sensor_up)", None),
@@ -192,24 +193,32 @@ def print_summary(aggregates):
 
 
 def main():
-    """Poll Prometheus and render a live view until Ctrl+C, then print and save the results."""
+    """Poll Prometheus and render a live view until Ctrl+C (or --duration seconds), then print and save."""
     parser = argparse.ArgumentParser(description="Live benchmark metrics monitor")
     parser.add_argument("--prometheus-url", required=True, help="Base URL of the Prometheus server")
     parser.add_argument("--interval", type=int, required=True, help="Seconds between polls")
     parser.add_argument("--scenario-name", required=True, help="Scenario file name, embedded in the output")
     parser.add_argument("--output-dir", required=True, type=Path, help="Directory JSON results are written to")
+    parser.add_argument("--duration", type=int, default=None,
+                        help="Run for N seconds then stop (default: run until Ctrl+C)")
     args = parser.parse_args()
 
     started_at = datetime.now(timezone.utc)
     samples = []
 
-    console.print(f"Polling {args.prometheus_url} every {args.interval}s. Press Ctrl+C to stop.\n")
+    if args.duration is not None:
+        console.print(f"Polling {args.prometheus_url} every {args.interval}s for {args.duration}s.\n")
+    else:
+        console.print(f"Polling {args.prometheus_url} every {args.interval}s. Press Ctrl+C to stop.\n")
     try:
-        # Run the poll loop inside a live-updating view; Ctrl+C is the only way to stop it.
+        # Run the poll loop inside a live-updating view; it stops on Ctrl+C, or once
+        # --duration seconds have elapsed when a fixed-duration run was requested.
         with Live(render_view(None, started_at), refresh_per_second=4, console=console) as live:
             for sample in poll_loop(args.prometheus_url, args.interval, started_at):
                 samples.append(sample)
                 live.update(render_view(sample, started_at))
+                if args.duration is not None and sample["elapsed_seconds"] >= args.duration:
+                    break
     except KeyboardInterrupt:
         pass  # user requested stop — fall through to summarizing and saving
     finally:

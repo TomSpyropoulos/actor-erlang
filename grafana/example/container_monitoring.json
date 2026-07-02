@@ -102,7 +102,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "rate(container_cpu_usage_seconds_total{name!=\"\"}[1m])",
+          "expr": "rate(container_cpu_usage_seconds_total{name!=\"\"}[15s])",
           "legendFormat": "{{name}}",
           "range": true,
           "refId": "A"
@@ -193,7 +193,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(container_memory_usage_bytes{name!=\"\"}[1m]) / 1024 / 1024",
+          "expr": "rate(container_memory_usage_bytes{name!=\"\"}[15s]) / 1024 / 1024",
           "legendFormat": "{{name}}",
           "range": true,
           "refId": "A"
@@ -283,7 +283,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "sum(rate(subscriber_requests_total[$__rate_interval]))",
+          "expr": "sum(rate(subscriber_requests_total[15s]))",
           "legendFormat": "Requests / Sec",
           "range": true,
           "refId": "A"
