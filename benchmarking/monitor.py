@@ -164,13 +164,17 @@ def render_view(sample, started_at):
     return Group(Text(f"Elapsed: {elapsed}", style="bold cyan"), render_table(sample))
 
 
-def write_output(output_dir, scenario_name, started_at, interval, samples, aggregates):
-    """Serialize the run's raw samples and aggregates to a timestamped JSON file under output_dir."""
+def write_output(output_dir, scenario_name, started_at, interval, samples, aggregates, rep=None):
+    """Serialize the run's raw samples and aggregates to a timestamped JSON file under output_dir.
+    When rep is given (a repetition index), tag the filename and payload so the post-run report
+    can group the reps of one scenario; without it the original single-run naming is preserved."""
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = Path(scenario_name).stem
-    path = output_dir / f"{stem}_{started_at.strftime('%Y%m%d-%H%M%S')}.json"
+    rep_tag = f"_rep{rep}" if rep is not None else ""
+    path = output_dir / f"{stem}{rep_tag}_{started_at.strftime('%Y%m%d-%H%M%S')}.json"
     payload = {
         "scenario": scenario_name,
+        "rep": rep,
         "started_at": started_at.isoformat(),
         "interval_seconds": interval,
         "samples": samples,
@@ -201,6 +205,8 @@ def main():
     parser.add_argument("--output-dir", required=True, type=Path, help="Directory JSON results are written to")
     parser.add_argument("--duration", type=int, default=None,
                         help="Run for N seconds then stop (default: run until Ctrl+C)")
+    parser.add_argument("--rep", type=int, default=None,
+                        help="Repetition index, tagged into the output filename/payload for grouping")
     args = parser.parse_args()
 
     started_at = datetime.now(timezone.utc)
@@ -227,7 +233,7 @@ def main():
         aggregates = compute_aggregates(samples)
         console.print()
         print_summary(aggregates)
-        path = write_output(args.output_dir, args.scenario_name, started_at, args.interval, samples, aggregates)
+        path = write_output(args.output_dir, args.scenario_name, started_at, args.interval, samples, aggregates, args.rep)
         console.print(f"\nSaved {len(samples)} samples to [bold]{path}[/]")
 
 

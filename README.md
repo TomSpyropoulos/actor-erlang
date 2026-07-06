@@ -66,7 +66,15 @@ The subscriber's DB write path is decoupled from any specific database through a
  14:22:11    2445    12.3 ms  40.1 ms  27.9 ms  53.8 ms  26.8 ms  33.1 ms      3 / 0          0.07        184.9
 ```
 
-**Single vs. batch mode.** `bench.sh <scenario>` runs one scenario interactively (stop with `Ctrl+C`). Set `RUN_DURATION` to run it unattended for a fixed number of seconds instead. `bench.sh all` sweeps **every** scenario in `benchmarking/scenarios/` back-to-back: it builds the images once up front, runs each for `RUN_DURATION` seconds (default `60`), writes one JSON per scenario to `benchmarking/output/`, and tears the stack down (`docker compose down -v`) between runs so each starts cold.
+**Single vs. batch mode.** `bench.sh <scenario>` runs one scenario interactively (stop with `Ctrl+C`). Set `RUN_DURATION` to run it unattended for a fixed number of seconds instead. `bench.sh all` sweeps **every** scenario in `benchmarking/scenarios/` back-to-back: it builds the images once up front, runs each for `RUN_DURATION` seconds (default `60`), writes one JSON per rep to `benchmarking/output/`, and tears the stack down (`docker compose down -v`) between reps so each starts cold.
+
+**Repetitions.** Each scenario is run `REPS` times (default `1`, but `3` in `bench.sh all`), tearing the stack down between reps so run-to-run noise can be told apart from a real runtime difference. Each rep's JSON is tagged `..._repN_...json`. Set `REPS` on a single scenario too (with `RUN_DURATION`) to repeat it unattended.
+
+**Post-run report.** After a full `bench.sh all` sweep, `benchmarking/report.py` aggregates every per-rep JSON into `benchmarking/output/report.csv` (one row per scenario) and `benchmarking/output/report.md` (one Markdown table per OFAT group, each cell `mean ± stdev` across reps). Run it standalone at any time against an existing `output/` directory:
+
+```bash
+benchmarking/.venv/bin/python benchmarking/report.py
+```
 
 To override the poll interval, set `METRICS_INTERVAL` in your scenario file or environment (defaults: `5`s in duration mode, `10`s interactive).
 
@@ -111,6 +119,7 @@ The no-batch-vs-batch comparison is the anchor (`timescale_load_p20.env`) versus
 | `BATCH_TIMEOUT_MS` | `1000` | Flush after this many ms even if buffer is not full |
 | `PAYLOAD_PADDING_BYTES` | `0` | Extra filler bytes added as a `"padding"` field in each publisher's JSON payload, for payload-size benchmarks |
 | `RUN_DURATION` | _(unset)_ | Fixed measurement window in seconds. Set it (or use `bench.sh all`, which defaults it to `60`) for an unattended run; leave unset for an interactive `Ctrl+C` run |
+| `REPS` | `1` | Times each scenario is repeated, with a full teardown between reps (`bench.sh all` defaults it to `3`). The report collapses reps to mean ± stdev |
 | `METRICS_INTERVAL` | `5` / `10` | Seconds between metric snapshots (defaults to `5` in duration mode, `10` interactive) |
 
 ### Supported `DB_BACKEND` values
@@ -121,9 +130,7 @@ The no-batch-vs-batch comparison is the anchor (`timescale_load_p20.env`) versus
 
 ### TODO / Planned
 
-- **Warm-up analysis** — runs currently measure from `t=0` including startup. Retain the per-interval time series and analyse the startup transient (latency-vs-time, time-to-steady-state — the JVM ramp vs. BEAM's flat start) separately from the steady-state plateau, rather than folding both into one aggregate.
-- **Repetitions (K=3)** — run each scenario 3× with a full teardown between reps and report mean ± stdev, so a runtime difference can be told apart from run-to-run noise. Pilot the spread on one scenario first to confirm K. (Needs a rep tag in `monitor.py`'s output filename and a rep loop in `bench.sh`.)
-- **Post-run report** — after a full sweep, aggregate the per-scenario JSON into a **CSV** (one row per runtime × scenario) and write a **Markdown** report (load-saturation curves, OFAT plots, batch crossover, interpretation) for lifting into the thesis. Excel only as an optional throwaway export.
+- **Warm-up analysis** — runs currently measure from `t=0` including startup. Retain the per-interval time series and analyse the startup transient (latency-vs-time, time-to-steady-state — the JVM ramp vs. BEAM's flat start) separately from the steady-state plateau, rather than folding both into one aggregate. **Prerequisite:** the latency metrics must first move from Prometheus quantile **summaries** to **histograms**. A summary exposes a pre-computed quantile over a fixed sliding window, so it can't be re-sliced after the fact; a histogram keeps the raw bucket counts, letting `histogram_quantile()` recompute a quantile over just the post-warm-up window. Until that migration lands, a steady-state cutoff can't be applied to the latency percentiles.
 
 ## 🧠 Deep Dive: Erlang Concurrency
 

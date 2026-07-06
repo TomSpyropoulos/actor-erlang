@@ -30,9 +30,9 @@ trap teardown EXIT
 # metrics endpoint, then hand off to monitor.py. Runs in a subshell so the scenario's
 # sourced variables don't leak into the next iteration (which would let a stale value
 # like PAYLOAD_PADDING_BYTES override the next scenario's compose interpolation).
-# Args: <scenario-file> <build|nobuild>
+# Args: <scenario-file> <build|nobuild> <rep>
 run_one() (
-    local scenario="$1" build="$2"
+    local scenario="$1" build="$2" rep="$3"
     set -a; source "$scenario"; set +a
 
     local pub="${PUBLISHER_COUNT:-1}"
@@ -72,13 +72,31 @@ run_one() (
         --interval "$interval" \
         --scenario-name "$(basename "$scenario")" \
         --output-dir "$BENCH_DIR/output" \
+        --rep "$rep" \
         "${duration_arg[@]}" || true
 )
 
+# Run one scenario REPS times, tearing the stack down between reps so each starts cold and
+# its run-to-run spread is real (not warm-cache carryover). The first rep honours the caller's
+# build flag; later reps reuse those images (nobuild) so a multi-rep run rebuilds only once.
+run_reps() {
+    local scenario="$1" build="$2"
+    local reps="${REPS:-1}"
+    for rep in $(seq 1 "$reps"); do
+        [[ "$reps" -gt 1 ]] && echo "----- rep $rep/$reps -----"
+        run_one "$scenario" "$build" "$rep"
+        teardown
+        build=nobuild
+    done
+}
+
 if [[ "$MODE" == all ]]; then
-    # Batch mode: fixed-duration run of every scenario, unattended. Build the images
-    # once up front so the per-scenario `up` never pays a rebuild across the sweep.
+    # Batch mode: fixed-duration run of every scenario, unattended, each repeated REPS times.
+    # RUN_DURATION and REPS both default here since they only make sense for an unattended sweep
+    # (K=3 reps let run-to-run noise be told apart from a real runtime difference). Build the
+    # images once up front so no per-scenario/per-rep `up` ever pays a rebuild across the sweep.
     : "${RUN_DURATION:=60}"; export RUN_DURATION
+    : "${REPS:=3}"; export REPS
     shopt -s nullglob
     scenarios=("$BENCH_DIR"/scenarios/*.env)
     shopt -u nullglob
@@ -91,15 +109,20 @@ if [[ "$MODE" == all ]]; then
     for scenario in "${scenarios[@]}"; do
         i=$((i + 1))
         echo ""
-        echo "########## [$i/${#scenarios[@]}] $(basename "$scenario") ##########"
-        run_one "$scenario" nobuild
-        teardown
+        echo "########## [$i/${#scenarios[@]}] $(basename "$scenario") (x${REPS}) ##########"
+        run_reps "$scenario" nobuild
     done
     echo ""
-    echo "Sweep complete: ${#scenarios[@]} scenarios. Results in $BENCH_DIR/output/"
+    echo "Sweep complete: ${#scenarios[@]} scenarios x ${REPS} reps. Results in $BENCH_DIR/output/"
+
+    # Aggregate every per-rep JSON into a CSV + Markdown report (stdlib only, so the venv
+    # built during the sweep already has what it needs).
+    echo "Generating report..."
+    "$VENV_DIR/bin/python" "$BENCH_DIR/report.py" --output-dir "$BENCH_DIR/output" || true
 else
     # Single-scenario mode. Interactive (Ctrl+C) unless RUN_DURATION is set, in which
     # case it runs unattended for that many seconds. Rebuilds to pick up code changes.
+    # REPS defaults to 1; set it (with RUN_DURATION) to repeat an unattended single scenario.
     [[ -f "$MODE" ]] || { echo "scenario file not found: $MODE" >&2; exit 1; }
-    run_one "$MODE" build
+    run_reps "$MODE" build
 fi
