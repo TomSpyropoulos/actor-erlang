@@ -70,7 +70,7 @@ The subscriber's DB write path is decoupled from any specific database through a
 
 **Repetitions.** Each scenario is run `REPS` times (default `1`, but `3` in `bench.sh all`), tearing the stack down between reps so run-to-run noise can be told apart from a real runtime difference. Each rep's JSON is tagged `..._repN_...json`. Set `REPS` on a single scenario too (with `RUN_DURATION`) to repeat it unattended.
 
-**Post-run report.** After a full `bench.sh all` sweep, `benchmarking/report.py` aggregates every per-rep JSON into `benchmarking/output/report.csv` (one row per scenario) and `benchmarking/output/report.md` (one Markdown table per OFAT group, each cell `mean ± stdev` across reps). Run it standalone at any time against an existing `output/` directory:
+**Post-run report.** After a full `bench.sh all` sweep, `benchmarking/report.py` aggregates every per-rep JSON into `benchmarking/output/report.csv` (one row per scenario) and `benchmarking/output/report.md` (one Markdown table per OFAT group, each cell `mean ± stdev` across reps). `bench.sh all` first clears `benchmarking/output/*.json` so the report covers only that sweep; run a single scenario and invoke `report.py` yourself if you'd rather accumulate runs across sweeps. Run it standalone at any time against an existing `output/` directory:
 
 ```bash
 benchmarking/.venv/bin/python benchmarking/report.py

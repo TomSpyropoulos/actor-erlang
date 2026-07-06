@@ -102,6 +102,11 @@ if [[ "$MODE" == all ]]; then
     shopt -u nullglob
     [[ ${#scenarios[@]} -gt 0 ]] || { echo "no scenario files in $BENCH_DIR/scenarios" >&2; exit 1; }
 
+    # Start each sweep from a clean slate so the report reflects only this run's data, not stale
+    # JSON left by earlier sweeps. -f keeps a non-matching glob from erroring when output/ is empty.
+    echo "Clearing previous run JSON from $BENCH_DIR/output/..."
+    rm -f "$BENCH_DIR"/output/*.json
+
     echo "Building images once before the sweep..."
     "${COMPOSE[@]}" build > /dev/null 2>&1
 
