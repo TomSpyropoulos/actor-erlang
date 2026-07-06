@@ -74,7 +74,7 @@ The Subscriber implements a heartbeat-based missing sensor detection system:
 
 - Every **5 seconds**, the MQTT client broadcasts a `heartbeat` message to all active worker actors.
 - The MQTT client uses a lock-free `ets:foldl/3` traversal over the shared worker routing table to send heartbeats, preventing any single process map traversal bottleneck.
-- Each worker compares its `lastSeen` timestamp (captured using the subscriber's local clock) against the current time.
+- Each worker compares its `last_seen` timestamp (captured using the subscriber's local clock) against the current time.
 - If a sensor has not sent data within the last second, its status transitions to `MISSING`; otherwise it is `ALIVE`.
 - State changes are logged via `logger` and persisted to the `sensor_status` table in TimescaleDB, but only when the status actually changes to avoid unnecessary writes.
 

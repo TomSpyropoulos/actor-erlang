@@ -9,14 +9,19 @@
 
 -include_lib("kernel/include/logger.hrl").
 
-%% @doc The state of the subscriber MQTT handler.
+%% How often every worker is pinged to re-evaluate its sensor's liveness.
+%% Coupled with ?LIVENESS_TIMEOUT_S (1s) in service_subscriber_worker, which sets how
+%% long a sensor may be silent before this check flips it to MISSING — keep the two in sync.
+-define(HEARTBEAT_INTERVAL_MS, 5000).
+
+%% State of the subscriber MQTT handler.
 %% `conn_opts`: Options used to connect to the MQTT broker.
 %% `conn_pid`: The PID of the emqtt client.
 %% `topic`: The wildcard topic this subscriber is listening to.
 -record(state, {
-	conn_opts:: [{atom(), term()}],
-	conn_pid :: pid() | undefined,
-    topic    :: binary() | undefined
+    conn_opts :: [{atom(), term()}],
+    conn_pid  :: pid() | undefined,
+    topic     :: binary() | undefined
 }).
 
 %% --- API Functions ---
@@ -29,13 +34,13 @@ start_link() ->
 
 %% Triggers an immediate connect attempt, starts the heartbeat timer, and creates the worker ETS table.
 init([]) ->
-	?LOG_INFO("MQTT Subscriber Started"),
-	self() ! connect_mqtt,
-	timer:send_interval(5000, send_heartbeat),
+    ?LOG_INFO("MQTT Subscriber Started"),
+    self() ! connect_mqtt,
+    timer:send_interval(?HEARTBEAT_INTERVAL_MS, send_heartbeat),
     %% public + read_concurrency: workers insert their own ETS entry and callers read without locks.
     ets:new(service_subscriber_workers, [set, public, named_table, {read_concurrency, true}]),
     {ok, #state{
-		conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, <<"erlang_subscriber">>}]
+        conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, <<"erlang_subscriber">>}]
     }}.
 
 %% No casts used; satisfy the callback contract.
@@ -70,7 +75,7 @@ handle_info(send_heartbeat, State) ->
 
 %% Forwards an incoming MQTT publish to the appropriate sensor worker, spawning one if needed.
 handle_info({publish, #{topic := Topic, payload := Payload}}, State) when is_binary(Topic) ->
-	spawn_or_forward(Topic, Payload, State);
+    spawn_or_forward(Topic, Payload, State);
 
 %% Cleans up the ETS entry for a worker that has crashed or stopped.
 handle_info({'DOWN', _Ref, process, Pid, _Reason}, State) ->

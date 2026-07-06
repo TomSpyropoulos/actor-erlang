@@ -9,16 +9,25 @@
 
 -include_lib("kernel/include/logger.hrl").
 
-%% @doc The state of a sensor worker actor.
+%% A sensor silent for longer than this at heartbeat time is declared MISSING.
+%% Coupled with ?HEARTBEAT_INTERVAL_MS (5000) in service_subscriber_mqtt, which sets
+%% how often this check runs — keep the two in sync when tuning liveness sensitivity.
+-define(LIVENESS_TIMEOUT_S, 1).
+
+%% Seconds from year 0 (Erlang's gregorian epoch) to 1970-01-01, used to convert
+%% calendar:datetime_to_gregorian_seconds/1 output into Unix time.
+-define(GREGORIAN_UNIX_OFFSET_S, 62167219200).
+
+%% State of a sensor worker actor.
 %% `topic`: The MQTT topic this worker is handling.
 %% `sum`: The running sum of all sensor values received.
-%% `lastSeen`: Unix timestamp (seconds) when the last message was received locally.
-%% `lastStatus`: The last reported status ('ALIVE' or 'MISSING').
+%% `last_seen`: Unix timestamp (seconds) when the last message was received locally.
+%% `last_status`: The last reported status ('ALIVE' or 'MISSING').
 -record(state, {
-	topic           :: binary(),
-	sum             :: integer() | undefined,
-	lastSeen        :: integer() | undefined,
-	lastStatus      :: binary() | undefined
+    topic           :: binary(),
+    sum             :: integer() | undefined,
+    last_seen       :: integer() | undefined,
+    last_status     :: binary() | undefined
 }).
 
 %% --- API Functions ---
@@ -33,15 +42,15 @@ start_link(Topic) ->
 %% Registers this worker's PID in the shared ETS table so the MQTT handler can route messages to it.
 init([Topic]) ->
     ets:insert(service_subscriber_workers, {Topic, self()}),
-	{ok, #state{topic = Topic}}.
+    {ok, #state{topic = Topic}}.
 
 %% Decodes a JSON sensor payload, persists it to the DB, and updates running latency metrics.
 handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
-	#{} = Data = json:decode(Msg),
-	<<_/binary>> = DeviceName = maps:get(<<"device_name">>, Data),
-	<<_/binary>> = Timestamp = maps:get(<<"timestamp">>, Data),
-	<<_/binary>> = BinaryValue = maps:get(<<"value">>, Data),
-	Value = binary_to_integer(BinaryValue),
+    #{} = Data = json:decode(Msg),
+    <<_/binary>> = DeviceName = maps:get(<<"device_name">>, Data),
+    <<_/binary>> = Timestamp = maps:get(<<"timestamp">>, Data),
+    <<_/binary>> = BinaryValue = maps:get(<<"value">>, Data),
+    Value = binary_to_integer(BinaryValue),
 
     %% fast_parse_timestamp returns {ErlTimestamp, MsgTimestampUs}.
     %% ErlTimestamp is the epgsql datetime tuple; ST is microseconds since Unix epoch.
@@ -60,19 +69,19 @@ handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
     service_subscriber_metrics:inc_requests(),
     service_subscriber_metrics:observe_latency(NativeLatency),
 
-	TotalSum = case Sum of undefined -> Value; _ -> Value + Sum end,
+    TotalSum = case Sum of undefined -> Value; _ -> Value + Sum end,
 
     {noreply, State#state{
-				 sum = TotalSum,
-				 lastSeen = os:system_time(second)
-				}}.
+                 sum = TotalSum,
+                 last_seen = os:system_time(second)
+                }}.
 
 %% No synchronous calls used; satisfy the callback contract.
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
 %% Evaluates sensor liveness based on time since last message and writes a status row when the state changes.
-handle_info(heartbeat, #state{topic = Topic, lastSeen = LastSeen, lastStatus = LastStatus} = State) ->
+handle_info(heartbeat, #state{topic = Topic, last_seen = LastSeen, last_status = LastStatus} = State) ->
     DeviceName = extract_device_name(Topic),
     Now = os:system_time(second),
 
@@ -81,7 +90,7 @@ handle_info(heartbeat, #state{topic = Topic, lastSeen = LastSeen, lastStatus = L
             {<<"MISSING">>, LastStatus =/= <<"MISSING">>};
         _ ->
             Diff = Now - LastSeen,
-            Status = case Diff > 1 of true -> <<"MISSING">>; false -> <<"ALIVE">> end,
+            Status = case Diff > ?LIVENESS_TIMEOUT_S of true -> <<"MISSING">>; false -> <<"ALIVE">> end,
             {Status, Status =/= LastStatus}
     end,
 
@@ -97,7 +106,7 @@ handle_info(heartbeat, #state{topic = Topic, lastSeen = LastSeen, lastStatus = L
     %% even when the status hasn't changed since the last heartbeat.
     service_subscriber_metrics:set_sensor_status(DeviceName, NewStatus),
 
-    {noreply, State#state{lastStatus = NewStatus}};
+    {noreply, State#state{last_status = NewStatus}};
 
 %% Discards unrecognised messages to keep the gen_server running cleanly.
 handle_info(_Info, State) ->
@@ -128,7 +137,7 @@ fast_parse_timestamp(<<Y1,Y2,Y3,Y4, $-, Mo1,Mo2, $-, D1,D2, $T, H1,H2, $:, Mi1,M
     Ms    = (Ms1 - $0) * 100 + (Ms2 - $0) * 10 + (Ms3 - $0),
     ErlTimestamp = {{Year, Month, Day}, {Hour, Min, Sec + Ms / 1000.0}},
     GregorianSecs = calendar:datetime_to_gregorian_seconds({{Year, Month, Day}, {Hour, Min, Sec}}),
-    UnixSecs = GregorianSecs - 62167219200,
+    UnixSecs = GregorianSecs - ?GREGORIAN_UNIX_OFFSET_S,
     ST = UnixSecs * 1000000 + Ms * 1000,
     {ErlTimestamp, ST};
 

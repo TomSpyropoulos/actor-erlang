@@ -1,5 +1,5 @@
-%% @doc Root supervisor for the publisher. Manages a single permanent worker
-%%      (service_publisher_srv) that handles MQTT publishing.
+%% Root supervisor for the publisher. Manages a single permanent worker
+%% (service_publisher_srv) that handles MQTT publishing.
 -module(service_publisher_sup).
 -behaviour(supervisor).
 
@@ -10,11 +10,13 @@
 
 -define(SERVER, ?MODULE).
 
+%% Starts the root supervisor and registers it locally.
 -spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
     ?LOG_INFO("Publisher Supervisor Started"),
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
+%% Defines the one_for_one strategy and the single permanent publisher worker.
 init([]) ->
     SupFlags = #{
         strategy  => one_for_one,
