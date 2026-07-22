@@ -14,7 +14,7 @@ The **Service Subscriber** is the core processing component of the IoT data pipe
    The worker actor parses the incoming JSON payload, extracts the `timestamp` and `value`, and transforms them into native Erlang types. It then persists this data into **TimescaleDB** (a PostgreSQL extension optimized for time-series data) for long-term storage and analytical querying.
 
 4. **Metrics and Observability:**
-   The worker calculates the end-to-end latency of the message by comparing the payload's original timestamp with the current system time. It records this latency, along with request counts, using the Erlang `prometheus.erl` library.
+   The worker calculates the end-to-end latency of the message by comparing the payload's original timestamp with the current system time. It records this latency, along with the ingest count, using the Erlang `prometheus.erl` library. Rows are counted as **committed** separately, on the DB write-ack path, so throughput reflects what actually reached the database rather than what was read off MQTT.
 
 ## 📨 Message Flow
 
@@ -28,7 +28,7 @@ flowchart TD
     G --> H["service_subscriber_worker:init\nets:insert(topic, self())"]
     E --> I[handle_cast Payload]
     H --> I
-    I --> J["json:decode + fast_parse_timestamp\nPrometheus: subscriber latency"]
+    I --> J["json:decode + fast_parse_timestamp\nPrometheus: requests_total (ingest) + subscriber latency"]
     J --> K["service_subscriber_db:insert\nround-robin via atomic counter"]
     K --> L["DB pool worker (1..DB_POOL_SIZE)"]
     L --> M[db_backend dispatch]
@@ -40,7 +40,7 @@ flowchart TD
     Q --> R
     R --> S[DB Ref ack]
     S --> T["db_backend_timescaledb:handle_result\nmatch with latency pairs"]
-    T --> U["service_subscriber_db\nrecord latency pairs\nPrometheus: e2e + db_write"]
+    T --> U["service_subscriber_db\nrecord latency pairs\nPrometheus: committed_total (+N rows) + e2e + db_write"]
 ```
 
 ## 🏗️ Architecture
@@ -60,13 +60,18 @@ The application is built around an OTP **Supervision Tree** optimized for massiv
 
 The Subscriber exposes the following Prometheus metrics on port `8081` (raw endpoint: `http://localhost:8081/metrics`):
 
-- `subscriber_requests_total`: Total count of MQTT messages processed.
+- `subscriber_requests_total`: Total count of MQTT messages **ingested** — incremented on receive, before the row reaches the database.
+- `subscriber_committed_total`: Total rows **committed** to the database — incremented on the DB write ack (by the batch size in batching mode, by 1 otherwise). Compare against `subscriber_requests_total`: the two track each other while the DB keeps up, and diverge once the write path saturates.
 - `subscriber_request_latency_milliseconds`: Latency from publisher send to subscriber receive, with quantiles (p50, p95, p99, p999).
 - `subscriber_e2e_latency_milliseconds`: End-to-end latency from publisher send to DB write ack, with quantiles (p50, p95, p99, p999).
 - `subscriber_db_write_latency_milliseconds`: Latency from subscriber receive to DB write ack, with quantiles (p50, p95, p99, p999).
 - `subscriber_sensor_up{device="<name>"}`: Per-sensor liveness gauge — `1` = ALIVE, `0` = MISSING. Updated every heartbeat.
 
-Latency metrics use `prometheus_quantile_summary`, which calculates percentiles accurately on the client side using a streaming algorithm. The library expects values in Erlang's native time unit when the metric name ends in `_milliseconds`, and converts automatically for Grafana.
+Latency metrics use `prometheus_quantile_summary`, which computes percentiles client-side. The library expects values in Erlang's native time unit when the metric name ends in `_milliseconds`, and converts automatically for Grafana.
+
+> **Reading the quantiles.** `prometheus_quantile_summary` is backed by a DDSketch (`ddskerl`): observations are log-bucketed and each quantile is reported as a **bucket midpoint**, so the figures carry a *relative* error (≈1% by default), not an exact rank. A practical consequence: two summaries whose values differ by less than the bucket width report the **same** number. Under saturation, `subscriber_e2e_latency_milliseconds` and `subscriber_db_write_latency_milliseconds` differ only by the publisher→subscriber hop (~1–2 ms) on top of multi-second queueing delay — far below 1% — so they can print identical quantiles even though the underlying observations differ. The `_sum`/`_count` values are exact and can be used to confirm the real difference. Tightening this via the `error`/`bound` declare options is possible but must account for the values being in **native** (nanosecond) units, and an undersized `bound` fails when a quantile is *read*, not when it is observed.
+>
+> Note this differs from the Scala service, whose Prometheus client uses a CKMS estimator returning actual observed samples. Tail figures are therefore **not strictly comparable** between the two implementations.
 
 ## 🔍 Missing Sensor Detection
 

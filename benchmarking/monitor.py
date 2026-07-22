@@ -126,47 +126,47 @@ def _series_sum(panels, panel_name):
 
 
 def render_table(sample):
-    """Build a fresh table of the latest sample's headline values, mirroring the Grafana dashboard."""
-    table = Table(title="Live benchmark metrics")
-    for column in ("time", "msgs/s", "committed/s",
-                   "req p50", "req p95", "req p99", "req p999",
-                   "e2e p50", "e2e p95", "e2e p99", "e2e p999",
-                   "db p50", "db p95", "db p99", "db p999",
-                   "sensors up/down", "cpu (cores)", "mem (MB)"):
-        table.add_column(column, justify="right")
-
-    if sample is None:
-        return table
-
-    panels = sample["panels"]
-
+    """Build the live view: a throughput/resource table plus a latency matrix (stage x quantile),
+    stacked vertically so no column has to be truncated to fit the terminal width."""
     # Render a numeric value with an optional unit suffix, or "?" while data is missing —
     # either the series doesn't exist yet (None) or it's a summary with no observations
     # yet (NaN, e.g. before the first DB write completes during pipeline warm-up).
     def fmt(value, suffix=""):
         return "?" if value is None or math.isnan(value) else f"{value:.1f}{suffix}"
 
-    table.add_row(
-        datetime.fromisoformat(sample["timestamp"]).strftime("%H:%M:%S"),
-        fmt(_series_value(panels, "messages_per_second", "value")),
-        fmt(_series_value(panels, "committed_per_second", "value")),
-        fmt(_series_value(panels, "publisher_subscriber_latency_ms", 'quantile="0.5"'), " ms"),
-        fmt(_series_value(panels, "publisher_subscriber_latency_ms", 'quantile="0.95"'), " ms"),
-        fmt(_series_value(panels, "publisher_subscriber_latency_ms", 'quantile="0.99"'), " ms"),
-        fmt(_series_value(panels, "publisher_subscriber_latency_ms", 'quantile="0.999"'), " ms"),
-        fmt(_series_value(panels, "publisher_db_e2e_latency_ms", 'quantile="0.5"'), " ms"),
-        fmt(_series_value(panels, "publisher_db_e2e_latency_ms", 'quantile="0.95"'), " ms"),
-        fmt(_series_value(panels, "publisher_db_e2e_latency_ms", 'quantile="0.99"'), " ms"),
-        fmt(_series_value(panels, "publisher_db_e2e_latency_ms", 'quantile="0.999"'), " ms"),
-        fmt(_series_value(panels, "db_write_latency_ms", 'quantile="0.5"'), " ms"),
-        fmt(_series_value(panels, "db_write_latency_ms", 'quantile="0.95"'), " ms"),
-        fmt(_series_value(panels, "db_write_latency_ms", 'quantile="0.99"'), " ms"),
-        fmt(_series_value(panels, "db_write_latency_ms", 'quantile="0.999"'), " ms"),
-        f"{fmt(_series_value(panels, 'sensors_alive', 'value'))} / {fmt(_series_value(panels, 'sensors_missing', 'value'))}",
-        fmt(_series_sum(panels, "container_cpu_usage")),
-        fmt(_series_sum(panels, "container_memory_usage_mb")),
-    )
-    return table
+    top = Table(title="Live benchmark metrics")
+    for column in ("time", "msgs/s", "committed/s", "sensors up/down", "cpu (cores)", "mem (MB)"):
+        top.add_column(column, justify="right")
+
+    # Latencies as a matrix: one row per pipeline stage, one column per quantile, so all four
+    # quantiles fit without the wide single-row layout that truncated cells to "...".
+    lat = Table(title="Latencies (ms)")
+    lat.add_column("stage", justify="left")
+    for column in ("p50", "p95", "p99", "p999"):
+        lat.add_column(column, justify="right")
+
+    if sample is not None:
+        panels = sample["panels"]
+        top.add_row(
+            datetime.fromisoformat(sample["timestamp"]).strftime("%H:%M:%S"),
+            fmt(_series_value(panels, "messages_per_second", "value")),
+            fmt(_series_value(panels, "committed_per_second", "value")),
+            f"{fmt(_series_value(panels, 'sensors_alive', 'value'))} / {fmt(_series_value(panels, 'sensors_missing', 'value'))}",
+            fmt(_series_sum(panels, "container_cpu_usage")),
+            fmt(_series_sum(panels, "container_memory_usage_mb")),
+        )
+        for label, panel in (("req (pub->sub)", "publisher_subscriber_latency_ms"),
+                             ("e2e (pub->db)", "publisher_db_e2e_latency_ms"),
+                             ("db  (sub->db)", "db_write_latency_ms")):
+            lat.add_row(
+                label,
+                fmt(_series_value(panels, panel, 'quantile="0.5"')),
+                fmt(_series_value(panels, panel, 'quantile="0.95"')),
+                fmt(_series_value(panels, panel, 'quantile="0.99"')),
+                fmt(_series_value(panels, panel, 'quantile="0.999"')),
+            )
+
+    return Group(top, lat)
 
 
 def render_view(sample, started_at):

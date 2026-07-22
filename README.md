@@ -51,7 +51,7 @@ The subscriber's DB write path is decoupled from any specific database through a
 
 `bench.sh` takes a scenario file, sources it as environment variables, starts the full Docker Compose stack with the configured number of publisher instances, and waits for the subscriber's Prometheus endpoint to come up. It then sets up a Python virtual environment under `benchmarking/.venv` (installing `benchmarking/requirements.txt` automatically on first run — no manual setup needed) and hands off to `benchmarking/monitor.py`.
 
-`monitor.py` queries Prometheus directly for the same panels shown on the "Container Monitoring" Grafana dashboard (message rate, the three latency summaries, sensor liveness, container CPU/memory) every `METRICS_INTERVAL` seconds (default: 10) and renders them as a live-updating table. Press `Ctrl+C` to stop: it prints an avg/max summary of the run and saves every raw, timestamped sample to a JSON file under `benchmarking/output/` — so you can revisit or replot a run's data later without re-running the (slow) benchmark. `bench.sh` then runs a clean `docker compose down -v`.
+`monitor.py` queries Prometheus directly for the same panels shown on the "Container Monitoring" Grafana dashboard (ingest rate, committed-rows rate, the three latency summaries, sensor liveness, container CPU/memory) every `METRICS_INTERVAL` seconds (default: 10) and renders them as a live-updating view: a throughput/resource table plus a latency matrix (stage × quantile). Press `Ctrl+C` to stop: it prints an avg/max summary of the run and saves every raw, timestamped sample to a JSON file under `benchmarking/output/` — so you can revisit or replot a run's data later without re-running the (slow) benchmark. `bench.sh` then runs a clean `docker compose down -v`.
 
 ```
 === Benchmark: timescale_batch.env ===
@@ -60,17 +60,24 @@ The subscriber's DB write path is decoupled from any specific database through a
   DB pool     : 5 workers
   Backend     : timescaledb
 
-                     Live benchmark metrics
-  time      msgs/s  req p50  req p99  e2e p50  e2e p99  db p50  db p99  sensors up/down  cpu (cores)  mem (MB)
- 14:22:01    1245    12.1 ms  39.8 ms  28.3 ms  54.1 ms  27.1 ms  32.9 ms      3 / 0          0.06        180.4
- 14:22:11    2445    12.3 ms  40.1 ms  27.9 ms  53.8 ms  26.8 ms  33.1 ms      3 / 0          0.07        184.9
+                      Live benchmark metrics
+   time      msgs/s   committed/s   sensors up/down   cpu (cores)   mem (MB)
+  14:22:11    2445        2441           3 / 0            0.07        184.9
+
+                    Latencies (ms)
+  stage             p50     p95     p99    p999
+  req (pub->sub)   12.3    28.4    40.1    58.2
+  e2e (pub->db)    27.9    44.6    53.8    77.5
+  db  (sub->db)    26.8    43.2    52.4    76.1
 ```
+
+`msgs/s` counts messages **ingested** off MQTT, while `committed/s` counts rows **actually written to the database**. They track each other while the DB keeps up; a sustained gap between them is the clearest signal that the write path — not the pipeline — is the bottleneck.
 
 **Single vs. batch mode.** `bench.sh <scenario>` runs one scenario interactively (stop with `Ctrl+C`). Set `RUN_DURATION` to run it unattended for a fixed number of seconds instead. `bench.sh all` sweeps **every** scenario in `benchmarking/scenarios/` back-to-back: it builds the images once up front, runs each for `RUN_DURATION` seconds (default `60`), writes one JSON per rep to `benchmarking/output/`, and tears the stack down (`docker compose down -v`) between reps so each starts cold.
 
 **Repetitions.** Each scenario is run `REPS` times (default `1`, but `3` in `bench.sh all`), tearing the stack down between reps so run-to-run noise can be told apart from a real runtime difference. Each rep's JSON is tagged `..._repN_...json`. Set `REPS` on a single scenario too (with `RUN_DURATION`) to repeat it unattended.
 
-**Post-run report.** After a full `bench.sh all` sweep, `benchmarking/report.py` aggregates every per-rep JSON into [`benchmarking/output/report.csv`](benchmarking/output/report.csv) (one row per scenario) and [`benchmarking/output/report.md`](benchmarking/output/report.md) (one Markdown table per OFAT group, each cell `mean ± stdev` across reps). `bench.sh all` first clears `benchmarking/output/*.json` so the report covers only that sweep; run a single scenario and invoke `report.py` yourself if you'd rather accumulate runs across sweeps. Run it standalone at any time against an existing `output/` directory:
+**Post-run report.** After a full `bench.sh all` sweep, `benchmarking/report.py` aggregates every per-rep JSON into [`benchmarking/output/report.csv`](benchmarking/output/report.csv) (one row per scenario) and [`benchmarking/output/report.md`](benchmarking/output/report.md) (one Markdown table per OFAT group, each cell `mean ± stdev` across reps). Every table reports `msgs_s` (ingested) alongside `committed_s` (committed to the DB), and p50/p95/p99/p999 for each of the three latencies. `bench.sh all` first clears `benchmarking/output/*.json` so the report covers only that sweep; run a single scenario and invoke `report.py` yourself if you'd rather accumulate runs across sweeps. Run it standalone at any time against an existing `output/` directory:
 
 ```bash
 benchmarking/.venv/bin/python benchmarking/report.py
