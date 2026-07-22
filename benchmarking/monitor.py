@@ -33,6 +33,7 @@ PANELS = [
     ("container_cpu_usage", 'rate(container_cpu_usage_seconds_total{name!=""}[15s])', "name"),
     ("container_memory_usage_mb", 'rate(container_memory_usage_bytes{name!=""}[15s]) / 1024 / 1024', "name"),
     ("messages_per_second", "sum(rate(subscriber_requests_total[15s]))", None),
+    ("committed_per_second", "sum(rate(subscriber_committed_total[15s]))", None),
     ("publisher_subscriber_latency_ms", "subscriber_request_latency_milliseconds", "quantile"),
     ("publisher_db_e2e_latency_ms", "subscriber_e2e_latency_milliseconds", "quantile"),
     ("sensors_alive", "sum(subscriber_sensor_up)", None),
@@ -127,8 +128,11 @@ def _series_sum(panels, panel_name):
 def render_table(sample):
     """Build a fresh table of the latest sample's headline values, mirroring the Grafana dashboard."""
     table = Table(title="Live benchmark metrics")
-    for column in ("time", "msgs/s", "req p50", "req p99", "e2e p50", "e2e p99",
-                   "db p50", "db p99", "sensors up/down", "cpu (cores)", "mem (MB)"):
+    for column in ("time", "msgs/s", "committed/s",
+                   "req p50", "req p95", "req p99", "req p999",
+                   "e2e p50", "e2e p95", "e2e p99", "e2e p999",
+                   "db p50", "db p95", "db p99", "db p999",
+                   "sensors up/down", "cpu (cores)", "mem (MB)"):
         table.add_column(column, justify="right")
 
     if sample is None:
@@ -145,12 +149,19 @@ def render_table(sample):
     table.add_row(
         datetime.fromisoformat(sample["timestamp"]).strftime("%H:%M:%S"),
         fmt(_series_value(panels, "messages_per_second", "value")),
+        fmt(_series_value(panels, "committed_per_second", "value")),
         fmt(_series_value(panels, "publisher_subscriber_latency_ms", 'quantile="0.5"'), " ms"),
+        fmt(_series_value(panels, "publisher_subscriber_latency_ms", 'quantile="0.95"'), " ms"),
         fmt(_series_value(panels, "publisher_subscriber_latency_ms", 'quantile="0.99"'), " ms"),
+        fmt(_series_value(panels, "publisher_subscriber_latency_ms", 'quantile="0.999"'), " ms"),
         fmt(_series_value(panels, "publisher_db_e2e_latency_ms", 'quantile="0.5"'), " ms"),
+        fmt(_series_value(panels, "publisher_db_e2e_latency_ms", 'quantile="0.95"'), " ms"),
         fmt(_series_value(panels, "publisher_db_e2e_latency_ms", 'quantile="0.99"'), " ms"),
+        fmt(_series_value(panels, "publisher_db_e2e_latency_ms", 'quantile="0.999"'), " ms"),
         fmt(_series_value(panels, "db_write_latency_ms", 'quantile="0.5"'), " ms"),
+        fmt(_series_value(panels, "db_write_latency_ms", 'quantile="0.95"'), " ms"),
         fmt(_series_value(panels, "db_write_latency_ms", 'quantile="0.99"'), " ms"),
+        fmt(_series_value(panels, "db_write_latency_ms", 'quantile="0.999"'), " ms"),
         f"{fmt(_series_value(panels, 'sensors_alive', 'value'))} / {fmt(_series_value(panels, 'sensors_missing', 'value'))}",
         fmt(_series_sum(panels, "container_cpu_usage")),
         fmt(_series_sum(panels, "container_memory_usage_mb")),

@@ -76,10 +76,12 @@ handle_cast({insert_status, DeviceName, Status},
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% Forwards every incoming message to the backend and records any returned latency pairs.
+%% Forwards every incoming message to the backend, counts committed rows, and records returned latency pairs.
 handle_info(Msg, #state{backend_mod = Mod, backend_state = BS} = S) ->
     case Mod:handle_result(Msg, BS) of
         {match, Latencies, NewBS} ->
+            %% Count rows as committed only once the backend acks the write; one latency entry per row.
+            service_subscriber_metrics:inc_committed(length(Latencies)),
             lists:foreach(fun({E2E, Sub}) -> record_latencies(E2E, Sub) end, Latencies),
             {noreply, S#state{backend_state = NewBS}};
         {no_match, NewBS} ->

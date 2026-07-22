@@ -20,12 +20,19 @@ from pathlib import Path
 # does). We take each series' run-average (`avg`), matching monitor.py's live view.
 SERIES_METRICS = [
     ("msgs_s", "messages_per_second / value"),
+    ("committed_s", "committed_per_second / value"),
     ("req_p50", 'publisher_subscriber_latency_ms / quantile="0.5"'),
+    ("req_p95", 'publisher_subscriber_latency_ms / quantile="0.95"'),
     ("req_p99", 'publisher_subscriber_latency_ms / quantile="0.99"'),
+    ("req_p999", 'publisher_subscriber_latency_ms / quantile="0.999"'),
     ("e2e_p50", 'publisher_db_e2e_latency_ms / quantile="0.5"'),
+    ("e2e_p95", 'publisher_db_e2e_latency_ms / quantile="0.95"'),
     ("e2e_p99", 'publisher_db_e2e_latency_ms / quantile="0.99"'),
+    ("e2e_p999", 'publisher_db_e2e_latency_ms / quantile="0.999"'),
     ("db_p50", 'db_write_latency_ms / quantile="0.5"'),
+    ("db_p95", 'db_write_latency_ms / quantile="0.95"'),
     ("db_p99", 'db_write_latency_ms / quantile="0.99"'),
+    ("db_p999", 'db_write_latency_ms / quantile="0.999"'),
 ]
 SUM_METRICS = [
     ("cpu_cores", "container_cpu_usage / "),
@@ -139,8 +146,8 @@ def write_markdown(path, rows, output_dir, run_count):
         "",
         f"Source: `{output_dir}` — {run_count} runs across {len(rows)} scenarios.",
         "",
-        "Latencies in ms, `msgs_s` in msg/s, `cpu_cores` in cores, `mem_mb` in MB. "
-        "Cells are mean ± stdev across reps.",
+        "Latencies in ms, `msgs_s` (ingested) and `committed_s` (DB-committed) in msg/s, "
+        "`cpu_cores` in cores, `mem_mb` in MB. Cells are mean ± stdev across reps.",
         "",
     ]
     header = "| value | reps | " + " | ".join(METRIC_NAMES) + " |"

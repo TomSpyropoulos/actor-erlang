@@ -3,7 +3,7 @@
 
 %% API
 -export([start_link/0]).
--export([inc_requests/0, observe_latency/1, observe_e2e_latency/1, observe_db_write_latency/1, set_sensor_status/2]).
+-export([inc_requests/0, inc_committed/1, observe_latency/1, observe_e2e_latency/1, observe_db_write_latency/1, set_sensor_status/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -19,6 +19,10 @@ start_link() ->
 %% Increments the total message counter by one for each processed sensor payload.
 inc_requests() ->
     prometheus_counter:inc(subscriber_requests_total).
+
+%% Increments the committed-rows counter by N on the DB-ack path (N=1 single insert, batch length otherwise).
+inc_committed(N) ->
+    prometheus_counter:inc(subscriber_committed_total, N).
 
 %% Records the subscriber-receive-to-now latency for the payload-timestamp summary.
 observe_latency(Latency) ->
@@ -46,6 +50,11 @@ init([]) ->
     prometheus_counter:declare([
         {name, subscriber_requests_total},
         {help, "Total requests processed by the subscriber."}
+    ]),
+
+    prometheus_counter:declare([
+        {name, subscriber_committed_total},
+        {help, "Total rows committed to the database."}
     ]),
 
     prometheus_quantile_summary:declare([
