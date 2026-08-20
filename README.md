@@ -49,7 +49,7 @@ The subscriber's DB write path is decoupled from any specific database through a
 
 ### How `bench.sh` works
 
-`bench.sh` takes a scenario file, sources it as environment variables, starts the full Docker Compose stack with the configured number of publisher instances, and waits for the subscriber's Prometheus endpoint to come up. It then sets up a Python virtual environment under `benchmarking/.venv` (installing `benchmarking/requirements.txt` automatically on first run — no manual setup needed) and hands off to `benchmarking/monitor.py`.
+`bench.sh` takes a scenario file, sources it as environment variables, starts the full Docker Compose stack with the configured number of publisher instances, and waits until the stack is actually ingesting — first for the subscriber's Prometheus endpoint to answer, then for `subscriber_requests_total` to start advancing. The second check matters because the metrics server binds before the subscriber has necessarily reached the broker or the database, so a subscriber that died during startup still serves a scrapeable `/metrics` with every counter at zero. A rep that does not begin ingesting within `INGEST_TIMEOUT` seconds (default `60`) is **skipped**: its container logs are dumped, no JSON is written, and the sweep moves on, so a dead run can never be averaged into a report cell. `bench.sh all` reports the number of skipped reps in its closing summary. It then sets up a Python virtual environment under `benchmarking/.venv` (installing `benchmarking/requirements.txt` automatically on first run — no manual setup needed) and hands off to `benchmarking/monitor.py`.
 
 `monitor.py` queries Prometheus directly for the same panels shown on the "Container Monitoring" Grafana dashboard (ingest rate, committed-rows rate, the three latency summaries, sensor liveness, container CPU/memory) every `METRICS_INTERVAL` seconds (default: 10) and renders them as a live-updating view: a throughput/resource table plus a latency matrix (stage × quantile). Press `Ctrl+C` to stop: it prints an avg/max summary of the run and saves every raw, timestamped sample to a JSON file under `benchmarking/output/` — so you can revisit or replot a run's data later without re-running the (slow) benchmark. `bench.sh` then runs a clean `docker compose down -v`.
 
@@ -155,6 +155,8 @@ The no-batch-vs-batch comparison is the `Batching` group: `timescale_batching_of
 | `BATCH_TIMEOUT_MS` | `1000` | Flush after this many ms even if buffer is not full |
 | `PAYLOAD_PADDING_BYTES` | `0` | Extra filler bytes added as a `"padding"` field in each publisher's JSON payload, for payload-size benchmarks |
 | `RUN_DURATION` | _(unset)_ | Fixed measurement window in seconds. Set it (or use `bench.sh all`, which defaults it to `60`) for an unattended run; leave unset for an interactive `Ctrl+C` run |
+| `STARTUP_TIMEOUT` | `180` | Seconds a rep may take to bring up a scrapeable metrics endpoint before it is skipped |
+| `INGEST_TIMEOUT` | `60` | Seconds a rep may take to start ingesting, once its endpoint answers, before it is skipped |
 | `REPS` | `1` | Times each scenario is repeated, with a full teardown between reps (`bench.sh all` defaults it to `3`). The report collapses reps to mean ± stdev |
 | `METRICS_INTERVAL` | `5` / `10` | Seconds between metric snapshots (defaults to `5` in duration mode, `10` interactive) |
 

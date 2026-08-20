@@ -99,7 +99,12 @@ services:
       - timescaledb-storage:/var/lib/postgresql/data
       - ./timescaledb/init/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      # -h 127.0.0.1 forces a TCP probe. Without it pg_isready checks the Unix socket, which the
+      # entrypoint's temporary init-time server (running init.sql) also answers -- so the container
+      # was marked healthy during initdb, dependents were released, and Postgres then shut down and
+      # restarted to bind TCP, refusing connections for ~3s. Every rep re-runs initdb because
+      # bench.sh tears down with `down -v`, so that window was reopened on every single run.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -6,6 +6,12 @@ BENCH_DIR="$REPO/benchmarking"
 VENV_DIR="$BENCH_DIR/.venv"
 COMPOSE=(docker compose -f "$REPO/docker-compose.yaml")
 
+# How long a rep may take to become measurable before it is abandoned. Startup covers image start
+# plus the database's initdb; ingestion covers broker connect and the first messages arriving.
+STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-180}"
+INGEST_TIMEOUT="${INGEST_TIMEOUT:-60}"
+SKIPPED_REPS=0
+
 MODE="${1:?Usage: $0 <scenario-file>|all}"
 
 # Create the monitor's venv and install its dependencies on first run only.
@@ -26,8 +32,16 @@ teardown() {
 }
 trap teardown EXIT
 
-# Run a single scenario end-to-end: bring the stack up, wait for the subscriber's
-# metrics endpoint, then hand off to monitor.py. Runs in a subshell so the scenario's
+# Current value of the subscriber's ingest counter, or 0 before the metric exists. Erlang's
+# prometheus.erl prints counters as plain integers and Scala's simpleclient prints them as floats,
+# so callers must compare these with awk rather than bash's integer test.
+subscriber_requests() {
+    curl -s http://localhost:8081/metrics 2>/dev/null \
+        | awk '/^subscriber_requests_total /{v=$2; found=1} END{print (found ? v : 0)}'
+}
+
+# Run a single scenario end-to-end: bring the stack up, wait until it is actually ingesting,
+# then hand off to monitor.py. Returns non-zero if the stack never became measurable. Runs in a subshell so the scenario's
 # sourced variables don't leak into the next iteration (which would let a stale value
 # like PAYLOAD_PADDING_BYTES override the next scenario's compose interpolation).
 # Args: <scenario-file> <build|nobuild> <rep>
@@ -59,7 +73,31 @@ run_one() (
     "${COMPOSE[@]}" "${up_args[@]}" > /dev/null 2>&1
 
     echo "Waiting for subscriber metrics endpoint..."
-    until curl -sf http://localhost:8081/metrics > /dev/null 2>&1; do sleep 1; done
+    local waited=0
+    until curl -sf http://localhost:8081/metrics > /dev/null 2>&1; do
+        sleep 1; waited=$((waited + 1))
+        if [[ $waited -ge $STARTUP_TIMEOUT ]]; then
+            echo "ERROR: metrics endpoint did not come up within ${STARTUP_TIMEOUT}s" >&2
+            "${COMPOSE[@]}" logs --tail 40 subscriber >&2 || true
+            return 1
+        fi
+    done
+
+    # The endpoint binds before the subscriber has necessarily reached the broker or the database,
+    # so a subscriber that died during startup still serves a scrapeable /metrics with every counter
+    # sitting at zero. Require the ingest counter to actually advance: without this gate a dead
+    # stack is measured for the full RUN_DURATION and its zeros are averaged into the report.
+    echo "Waiting for ingestion to start..."
+    local before after ingest_waited=0
+    before=$(subscriber_requests)
+    until after=$(subscriber_requests); awk -v a="$before" -v b="$after" 'BEGIN{exit !(b > a)}'; do
+        sleep 1; ingest_waited=$((ingest_waited + 1))
+        if [[ $ingest_waited -ge $INGEST_TIMEOUT ]]; then
+            echo "ERROR: subscriber is up but ingested nothing in ${INGEST_TIMEOUT}s (counter stuck at ${after})" >&2
+            "${COMPOSE[@]}" logs --tail 40 subscriber >&2 || true
+            return 1
+        fi
+    done
 
     ensure_venv
 
@@ -84,7 +122,12 @@ run_reps() {
     local reps="${REPS:-1}"
     for rep in $(seq 1 "$reps"); do
         [[ "$reps" -gt 1 ]] && echo "----- rep $rep/$reps -----"
-        run_one "$scenario" "$build" "$rep"
+        # A rep that never becomes measurable is skipped rather than fatal: it writes no JSON, so
+        # report.py cannot average a dead run into a cell, and the rest of the sweep still runs.
+        if ! run_one "$scenario" "$build" "$rep"; then
+            SKIPPED_REPS=$((SKIPPED_REPS + 1))
+            echo "!!! SKIPPED $(basename "$scenario") rep $rep - no data recorded" >&2
+        fi
         teardown
         build=nobuild
     done
@@ -118,7 +161,7 @@ if [[ "$MODE" == all ]]; then
         run_reps "$scenario" nobuild
     done
     echo ""
-    echo "Sweep complete: ${#scenarios[@]} scenarios x ${REPS} reps. Results in $BENCH_DIR/output/"
+    echo "Sweep complete: ${#scenarios[@]} scenarios x ${REPS} reps, ${SKIPPED_REPS} reps skipped. Results in $BENCH_DIR/output/"
 
     # Aggregate every per-rep JSON into a CSV + Markdown report (stdlib only, so the venv
     # built during the sweep already has what it needs).
