@@ -96,23 +96,38 @@ chmod +x bench.sh
 # One scenario, fixed 60s unattended run:
 RUN_DURATION=60 ./bench.sh benchmarking/scenarios/timescale_load_p20.env
 
-# The full OFAT sweep (all 24 scenarios, 60s each, unattended):
+# The full OFAT sweep (all 26 scenarios, 60s each, unattended):
 ./bench.sh all
 ```
 
 ### Available scenarios
 
-All 24 scenarios follow a **one-factor-at-a-time (OFAT)** design: every file changes exactly one variable from a shared **anchor** (`20` publishers ≈ 20k msg/s, pool `20`, batching off, no payload padding), so any measured effect is attributable to that one factor. The batch scenarios share a **batch sub-anchor** (batching on, size `100`, timeout `500`ms) that differs from the anchor only by enabling batching.
+All 26 scenarios follow a **one-factor-at-a-time (OFAT)** design: every file changes exactly one variable from a shared **anchor** (`20` publishers ≈ 20k msg/s, pool `20`, batching on at size `50` / timeout `200`ms, no payload padding), so any measured effect is attributable to that one factor.
+
+The anchor batches because the single-row write path cannot sustain 20k msg/s: rows queue ahead of the database and end-to-end latency climbs for as long as the run lasts, which makes the measured percentiles a function of `RUN_DURATION` rather than of the runtime under test. The `Batching` group keeps one `BATCH_ENABLED=false` run as the reference point showing that.
+
+Since there is now a single anchor, six files are identical to it (`load_p20`, `pool_20`, `payload_0`, `batchsize_050`, `batchto_0200`, `batching_on`). That redundancy is deliberate: at `REPS=3` a sweep measures the anchor 18 times, and the spread across those runs is the noise floor that differences elsewhere in the report should be judged against.
 
 | Group | File pattern | Factor swept | Values (**bold** = anchor) |
 |-------|--------------|--------------|----------------------------|
 | Load | `timescale_load_p{NN}.env` | `PUBLISHER_COUNT` | 4, 8, 16, **20**, 32, 48, 64 |
 | Pool | `timescale_pool_{NN}.env` | `DB_POOL_SIZE` | 5, 10, **20**, 50 |
 | Payload | `timescale_payload_{N}.env` | `PAYLOAD_PADDING_BYTES` | **0**, 256, 1KB, 10KB |
-| Batch size | `timescale_batchsize_{NNN}.env` | `BATCH_SIZE` (batch on) | 20, 50, **100**, 200, 500 |
-| Batch timeout | `timescale_batchto_{NNNN}.env` | `BATCH_TIMEOUT_MS` (batch on) | 50, 200, **500**, 1000 |
+| Batch size | `timescale_batchsize_{NNN}.env` | `BATCH_SIZE` | 20, **50**, 100, 200, 500 |
+| Batch timeout | `timescale_batchto_{NNNN}.env` | `BATCH_TIMEOUT_MS` | 50, **200**, 500, 1000 |
+| Batching | `timescale_batching_{off,on}.env` | `BATCH_ENABLED` | off, **on** |
 
-The no-batch-vs-batch comparison is the anchor (`timescale_load_p20.env`) versus the batch sub-anchor (`timescale_batchsize_100.env`, identical to `timescale_batchto_0500.env`).
+The two batch factors are not independent: a buffer flushes on whichever trigger fires first, so the
+**effective batch size** is roughly `min(BATCH_SIZE, per-writer rate × BATCH_TIMEOUT_MS)`. Rows are routed
+round-robin across `DB_POOL_SIZE` writers, so at the anchor each writer sees ≈ 19k/20 ≈ 950 rows/s and a
+50-row buffer fills in ≈ 53ms — well under the 200ms timeout, which makes `BATCH_SIZE` the binding trigger
+under load and leaves the timeout as the latency guard for low-rate periods. Sweeping the timeout below the
+fill time therefore does not measure the timeout so much as silently shrink the effective batch, and cells
+where the two triggers are comparable (e.g. `batchto_0050` at the anchor's 50-row buffer) tend to alternate
+between them and show correspondingly wide run-to-run spread.
+
+The no-batch-vs-batch comparison is the `Batching` group: `timescale_batching_off.env` versus
+`timescale_batching_on.env` (the latter identical to the anchor).
 
 ### Scenario variables reference
 
