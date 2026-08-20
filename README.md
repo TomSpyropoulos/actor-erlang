@@ -96,13 +96,13 @@ chmod +x bench.sh
 # One scenario, fixed 60s unattended run:
 RUN_DURATION=60 ./bench.sh benchmarking/scenarios/timescale_load_p20.env
 
-# The full OFAT sweep (all 26 scenarios, 60s each, unattended):
+# The full OFAT sweep (all 25 scenarios, 60s each, unattended):
 ./bench.sh all
 ```
 
 ### Available scenarios
 
-All 26 scenarios follow a **one-factor-at-a-time (OFAT)** design: every file changes exactly one variable from a shared **anchor** (`20` publishers ≈ 20k msg/s, pool `20`, batching on at size `50` / timeout `200`ms, no payload padding), so any measured effect is attributable to that one factor.
+All 25 scenarios follow a **one-factor-at-a-time (OFAT)** design: every file changes exactly one variable from a shared **anchor** (`20` publishers ≈ 20k msg/s, pool `20`, batching on at size `50` / timeout `200`ms, no payload padding), so any measured effect is attributable to that one factor.
 
 The anchor batches because the single-row write path cannot sustain 20k msg/s: rows queue ahead of the database and end-to-end latency climbs for as long as the run lasts, which makes the measured percentiles a function of `RUN_DURATION` rather than of the runtime under test. The `Batching` group keeps one `BATCH_ENABLED=false` run as the reference point showing that.
 
@@ -110,7 +110,7 @@ Since there is now a single anchor, six files are identical to it (`load_p20`, `
 
 | Group | File pattern | Factor swept | Values (**bold** = anchor) |
 |-------|--------------|--------------|----------------------------|
-| Load | `timescale_load_p{NN}.env` | `PUBLISHER_COUNT` | 4, 8, 16, **20**, 32, 48, 64 |
+| Load | `timescale_load_p{NN}.env` | `PUBLISHER_COUNT` | 4, 8, 16, **20**, 32, 48 |
 | Pool | `timescale_pool_{NN}.env` | `DB_POOL_SIZE` | 5, 10, **20**, 50 |
 | Payload | `timescale_payload_{N}.env` | `PAYLOAD_PADDING_BYTES` | **0**, 256, 1KB, 10KB |
 | Batch size | `timescale_batchsize_{NNN}.env` | `BATCH_SIZE` | 20, **50**, 100, 200, 500 |
@@ -122,9 +122,23 @@ The two batch factors are not independent: a buffer flushes on whichever trigger
 round-robin across `DB_POOL_SIZE` writers, so at the anchor each writer sees ≈ 19k/20 ≈ 950 rows/s and a
 50-row buffer fills in ≈ 53ms — well under the 200ms timeout, which makes `BATCH_SIZE` the binding trigger
 under load and leaves the timeout as the latency guard for low-rate periods. Sweeping the timeout below the
-fill time therefore does not measure the timeout so much as silently shrink the effective batch, and cells
-where the two triggers are comparable (e.g. `batchto_0050` at the anchor's 50-row buffer) tend to alternate
-between them and show correspondingly wide run-to-run spread.
+fill time therefore does not measure the timeout so much as silently shrink the effective batch. Where the
+timeout is the shorter of the two (e.g. `batchto_0050` against the anchor's ≈53ms fill) the timer wins every
+cycle rather than racing the buffer, because it is armed on the first row of each new buffer instead of
+free-running — so the flush period is fixed and the resulting tail is *tighter* than a size-triggered one,
+not noisier.
+
+**Why the load sweep stops at 48 publishers.** Load generation is co-located with the system under
+test on the same host, and the publishers are the largest CPU consumer in the stack. Up to 32 publishers
+both runtimes deliver ≥97% of the nominal 1000 msg/s per publisher; at 48 Erlang still delivers 98% while
+Scala drops to 77%, because a Scala publisher costs roughly 34% more CPU per message. A 64-publisher
+scenario used to exist and was removed: at that scale the observability stack fails before any valid
+measurement is taken — the Erlang subscriber's `/metrics` endpoint takes 9–16s to answer (against
+Prometheus's 2s budget, so its target reports `down` for the whole run) and Scala's cAdvisor target times
+out scraping 71 containers. The pipeline itself stays healthy there — the Erlang stack was measured
+committing 28k rows/s while Prometheus reported it down — so the failure is one of measurement, not of the
+runtimes. Treat 32 publishers as the ceiling for cross-runtime comparison and 48 as an
+Erlang-only headroom point.
 
 The no-batch-vs-batch comparison is the `Batching` group: `timescale_batching_off.env` versus
 `timescale_batching_on.env` (the latter identical to the anchor).

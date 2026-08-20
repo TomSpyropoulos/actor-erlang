@@ -71,7 +71,7 @@ def parse_group_value(scenario):
     return group, (value or "-")
 
 
-# Order factor values by magnitude across mixed unit suffixes (p04<p64, 256b<1kb<10kb) by
+# Order factor values by magnitude across mixed unit suffixes (p04<p48, 256b<1kb<10kb) by
 # scaling the first digit run by a k/m suffix, so payload byte sizes sort semantically.
 def value_sort_key(value):
     match = re.search(r"\d+", value)
