@@ -153,7 +153,7 @@ The no-batch-vs-batch comparison is the `Batching` group: `timescale_batching_of
 | `BATCH_ENABLED` | `false` | Enable row buffering |
 | `BATCH_SIZE` | `100` | Flush when buffer reaches this many rows |
 | `BATCH_TIMEOUT_MS` | `1000` | Flush after this many ms even if buffer is not full |
-| `PAYLOAD_PADDING_BYTES` | `0` | Extra filler bytes added as a `"padding"` field in each publisher's JSON payload, for payload-size benchmarks |
+| `PAYLOAD_PADDING_BYTES` | `0` | Extra filler bytes added as a trailing `"padding"` field on top of the shared base payload (identical in both arms), for payload-size benchmarks |
 | `RUN_DURATION` | _(unset)_ | Fixed measurement window in seconds. Set it (or use `bench.sh all`, which defaults it to `60`) for an unattended run; leave unset for an interactive `Ctrl+C` run |
 | `STARTUP_TIMEOUT` | `180` | Seconds a rep may take to bring up a scrapeable metrics endpoint before it is skipped |
 | `INGEST_TIMEOUT` | `60` | Seconds a rep may take to start ingesting, once its endpoint answers, before it is skipped |

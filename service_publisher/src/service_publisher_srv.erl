@@ -86,16 +86,24 @@ handle_info(publish_tick,
                            topic = Topic,
                            sensor = SensorBin,
                            padding_size = PaddingSize}) ->
-    RandomValue = integer_to_binary(rand:uniform(10)),
-    Timestamp = calendar:system_time_to_rfc3339(erlang:system_time(millisecond), [{unit, millisecond}, {offset, "Z"}]),
-    TimestampBinary = list_to_binary(Timestamp),
-    BaseMap = #{<<"device_name">> => SensorBin, <<"timestamp">> => TimestampBinary, <<"value">> => RandomValue},
-    %% Extra filler field for payload-size benchmarks; omitted when PAYLOAD_PADDING_BYTES is unset/0.
-    JsonMap = case PaddingSize of
-        0 -> BaseMap;
-        _ -> BaseMap#{<<"padding">> => binary:copy(<<"x">>, PaddingSize)}
+    RandomValue = rand:uniform(10),
+    %% Same clock and resolution as service_subscriber_worker's arrival stamp; erlang:system_time
+    %% is a different (corrected) clock, so don't swap it in. The 6-digit fraction is fixed-width,
+    %% which keeps the payload a constant size.
+    NowUs = os:system_time(microsecond),
+    Timestamp = calendar:system_time_to_rfc3339(NowUs, [{unit, microsecond}, {offset, "Z"}]),
+    %% Shared wire format: compact, this field order, unquoted value. Byte-identical to data/2 in
+    %% actor-scala/service-publisher/src/main/scala/com/publisher/Main.scala and parsed by
+    %% fast_parse_timestamp/1; json:encode would reorder the keys.
+    Padding = case PaddingSize of
+        0 -> <<>>;
+        _ -> [<<",\"padding\":\"">>, binary:copy(<<"x">>, PaddingSize), $"]
     end,
-    Json = json:encode(JsonMap),
+    %% iolist, not iolist_to_binary/1: emqtt takes iodata, so the padding is never copied.
+    Json = [<<"{\"device_name\":\"">>, SensorBin,
+            <<"\",\"timestamp\":\"">>, Timestamp,
+            <<"\",\"value\":">>, integer_to_binary(RandomValue),
+            Padding, $}],
     emqtt:publish(Pid, Topic, Json, 0),
     {noreply, State};
 

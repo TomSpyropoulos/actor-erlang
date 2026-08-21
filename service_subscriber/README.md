@@ -11,10 +11,10 @@ The **Service Subscriber** is the core processing component of the IoT data pipe
    Instead of processing all messages in a single bottleneck process, the Subscriber utilizes the Actor Model. For every unique sensor topic it receives a message from, it spawns a dedicated **Worker Actor** (a GenServer). This worker maintains the localized state for that specific sensor (e.g., the running sum of values, last seen timestamp).
 
 3. **Data Transformation & Storage:**
-   The worker actor parses the incoming JSON payload, extracts the `timestamp` and `value`, and transforms them into native Erlang types. It then persists this data into **TimescaleDB** (a PostgreSQL extension optimized for time-series data) for long-term storage and analytical querying.
+   The worker actor parses the incoming JSON payload, extracts the `timestamp` and `value`, and transforms them into native Erlang types. `timestamp` arrives in the shared wire format — RFC 3339 UTC with six fractional digits — and `fast_parse_timestamp/1` decodes those fixed-width digits straight into microseconds since the Unix epoch. It then persists this data into **TimescaleDB** (a PostgreSQL extension optimized for time-series data) for long-term storage and analytical querying.
 
 4. **Metrics and Observability:**
-   The worker calculates the end-to-end latency of the message by comparing the payload's original timestamp with the current system time. It records this latency, along with the ingest count, using the Erlang `prometheus.erl` library. Rows are counted as **committed** separately, on the DB write-ack path, so throughput reflects what actually reached the database rather than what was read off MQTT.
+   The worker calculates the end-to-end latency of the message by comparing the payload's original timestamp with the current system time, both read from `os:system_time(microsecond)` — the same clock the publisher stamps with. It records this latency, along with the ingest count, using the Erlang `prometheus.erl` library. Rows are counted as **committed** separately, on the DB write-ack path, so throughput reflects what actually reached the database rather than what was read off MQTT.
 
 ## 📨 Message Flow
 

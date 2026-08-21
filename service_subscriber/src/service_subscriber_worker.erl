@@ -49,8 +49,9 @@ handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
     #{} = Data = json:decode(Msg),
     <<_/binary>> = DeviceName = maps:get(<<"device_name">>, Data),
     <<_/binary>> = Timestamp = maps:get(<<"timestamp">>, Data),
-    <<_/binary>> = BinaryValue = maps:get(<<"value">>, Data),
-    Value = binary_to_integer(BinaryValue),
+    %% Bare JSON number on the wire (see service_publisher_srv), so it decodes straight to an integer.
+    Value = maps:get(<<"value">>, Data),
+    true = is_integer(Value),
 
     %% fast_parse_timestamp returns {ErlTimestamp, MsgTimestampUs}.
     %% ErlTimestamp is the epgsql datetime tuple; ST is microseconds since Unix epoch.
@@ -73,7 +74,9 @@ handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
 
     {noreply, State#state{
                  sum = TotalSum,
-                 last_seen = os:system_time(second)
+                 %% Reuses ProcessingStartUs like LatencyUs above; the drift is nothing
+                 %% against the 1s ?LIVENESS_TIMEOUT_S.
+                 last_seen = ProcessingStartUs div 1000000
                 }}.
 
 %% No synchronous calls used; satisfy the callback contract.
@@ -126,22 +129,24 @@ terminate(_Reason, #state{topic = Topic}) ->
     ets:delete(service_subscriber_workers, Topic),
     ok.
 
-%% Fast path for the canonical ISO-8601 UTC format with millisecond precision, avoiding calendar overhead.
-fast_parse_timestamp(<<Y1,Y2,Y3,Y4, $-, Mo1,Mo2, $-, D1,D2, $T, H1,H2, $:, Mi1,Mi2, $:, S1,S2, $., Ms1,Ms2,Ms3, $Z>>) ->
+%% Fast path for the shared wire format (ISO-8601 UTC, six fractional digits), avoiding calendar
+%% overhead. Fixed-width by agreement with service_publisher_srv -- keep the two in sync.
+fast_parse_timestamp(<<Y1,Y2,Y3,Y4, $-, Mo1,Mo2, $-, D1,D2, $T, H1,H2, $:, Mi1,Mi2, $:, S1,S2, $., U1,U2,U3,U4,U5,U6, $Z>>) ->
     Year  = (Y1 - $0) * 1000 + (Y2 - $0) * 100 + (Y3 - $0) * 10 + (Y4 - $0),
     Month = (Mo1 - $0) * 10 + (Mo2 - $0),
     Day   = (D1 - $0) * 10 + (D2 - $0),
     Hour  = (H1 - $0) * 10 + (H2 - $0),
     Min   = (Mi1 - $0) * 10 + (Mi2 - $0),
     Sec   = (S1 - $0) * 10 + (S2 - $0),
-    Ms    = (Ms1 - $0) * 100 + (Ms2 - $0) * 10 + (Ms3 - $0),
-    ErlTimestamp = {{Year, Month, Day}, {Hour, Min, Sec + Ms / 1000.0}},
+    Us    = (U1 - $0) * 100000 + (U2 - $0) * 10000 + (U3 - $0) * 1000
+          + (U4 - $0) * 100 + (U5 - $0) * 10 + (U6 - $0),
+    ErlTimestamp = {{Year, Month, Day}, {Hour, Min, Sec + Us / 1000000.0}},
     GregorianSecs = calendar:datetime_to_gregorian_seconds({{Year, Month, Day}, {Hour, Min, Sec}}),
     UnixSecs = GregorianSecs - ?GREGORIAN_UNIX_OFFSET_S,
-    ST = UnixSecs * 1000000 + Ms * 1000,
+    ST = UnixSecs * 1000000 + Us,
     {ErlTimestamp, ST};
 
-%% Fallback for timestamps that don't match the tight pattern above (e.g. no milliseconds, non-UTC offset).
+%% Fallback for anything not matching the tight pattern above (other precisions, non-UTC offset).
 fast_parse_timestamp(Timestamp) ->
     ST = calendar:rfc3339_to_system_time(binary_to_list(Timestamp), [{unit, microsecond}]),
     Secs = ST div 1000000,
