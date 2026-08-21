@@ -10,7 +10,7 @@
 %%
 %% Batching mode: rows are buffered in state until the batch reaches
 %% BATCH_SIZE or a BATCH_TIMEOUT_MS timer fires. On flush a single
-%% multi-row INSERT is sent via epgsqla:equery/3. Latencies for all rows
+%% multi-row INSERT is sent via epgsqla:prepared_query/3. Latencies for all rows
 %% in the batch are computed on ack and returned as a list.
 %%
 %% Connection parameters are read from environment variables at startup:
@@ -105,12 +105,10 @@ init(Index) ->
         self_pid           = SelfPid
     },
 
-    %% Start the first flush timer when batching is on.
-    State2 = case BatchEnabled of
-        true  -> schedule_timer(State);
-        false -> State
-    end,
-    {ok, State2}.
+    %% No timer is armed here: the first buffered row arms it via insert/6. Arming one against
+    %% an empty buffer only schedules a wake-up with nothing to flush. Mirrors the Scala
+    %% DbWriterActor, which likewise arms nothing at construction.
+    {ok, State}.
 
 %% Sends a single async prepared-query to PostgreSQL and stores the ref for later latency computation.
 insert(#ts_state{batch_enabled = false,
@@ -152,16 +150,19 @@ insert_status(#ts_state{db_pid = DB, insert_status_stmt = Stmt} = State,
     epgsqla:prepared_query(DB, Stmt, TypedParams),
     {ok, State}.
 
-%% Flushes any buffered rows when the timeout fires and reschedules the next flush timer.
+%% Flushes any buffered rows when the timeout fires. Deliberately does NOT re-arm: the next row to
+%% arrive re-arms via the NewCount =:= 1 branch in insert/6, so at most one timer is ever live per
+%% buffering cycle. Re-arming unconditionally here is what let a leaked timer replace itself on every
+%% firing, so the live-timer count could only ever grow.
 handle_result(flush_batch, #ts_state{batch_enabled = true,
                                       buffer = Buf} = State) ->
+    %% Cleared before flush/1 so it skips cancelling a timer that has already fired.
     State1 = State#ts_state{timer_ref = undefined},
     State2 = case Buf of
         [] -> State1;
         _  -> flush(State1)
     end,
-    %% Reschedule for the next interval.
-    {no_match, schedule_timer(State2)};
+    {no_match, State2};
 
 %% Claims a PostgreSQL ack matched by ref and computes latencies for each row in the pending map.
 handle_result({DB, Ref, _Result},
@@ -194,8 +195,16 @@ terminate(#ts_state{db_pid = DB}) ->
 %% --- Internal helpers ---
 
 %% Sends the entire buffer as a single unnest INSERT and registers the batch ref for latency tracking.
+%% Cancels the pending flush timer first: clearing timer_ref without cancelling left the timer armed in
+%% the VM, so every size-triggered flush orphaned one. cancel_timer/1 returns false if it had already
+%% fired, leaving a stale flush_batch in the mailbox -- that costs at most one early flush and cannot
+%% accumulate. The Scala DbWriterActor's timers.cancel has the same benign race.
 flush(#ts_state{db_pid = DB, batch_insert_stmt = Stmt,
-                buffer = Buf, pending = P} = State) ->
+                buffer = Buf, pending = P, timer_ref = TRef} = State) ->
+    _ = case TRef of
+        undefined -> ok;
+        _         -> erlang:cancel_timer(TRef)
+    end,
     Rows = lists:reverse(Buf),
     Names      = [N  || {N, _, _,  _, _} <- Rows],
     Values     = [V  || {_, V, _,  _, _} <- Rows],

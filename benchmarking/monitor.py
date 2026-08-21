@@ -26,12 +26,16 @@ console = Console()
 # legend, not just the raw label set, is what keeps each series identifiable without
 # dragging along cAdvisor's ~30 incidental docker-compose labels. This list is the single
 # source of truth for what gets watched, displayed, and saved — update it here if the
-# dashboard's panels ever change. Grafana's `$__rate_interval` is replaced with a fixed
-# `15s` rate window: at Prometheus' 2s scrape interval that spans ~7 samples (stable) yet
-# reaches a full window in 15s, so throughput/CPU settle far sooner than a `1m` window's 60s.
+# dashboard's panels ever change. In the rate-based panels Grafana's `$__rate_interval` is
+# replaced with a fixed `15s` rate window: at Prometheus' 2s scrape interval that spans ~7
+# samples (stable) yet reaches a full window in 15s, so throughput/CPU settle far sooner than
+# a `1m` window's 60s. Memory is deliberately NOT one of them: it is an instant gauge read.
+# container_memory_usage_bytes is a gauge, so rate() over it reports its per-second rate of
+# change — noise around zero for a steady-state process, not footprint. working_set excludes
+# inactive page cache, so the subscriber is not credited with TimescaleDB's file cache.
 PANELS = [
     ("container_cpu_usage", 'rate(container_cpu_usage_seconds_total{name!=""}[15s])', "name"),
-    ("container_memory_usage_mb", 'rate(container_memory_usage_bytes{name!=""}[15s]) / 1024 / 1024', "name"),
+    ("container_memory_usage_mb", 'container_memory_working_set_bytes{name!=""} / 1024 / 1024', "name"),
     ("messages_per_second", "sum(rate(subscriber_requests_total[15s]))", None),
     ("committed_per_second", "sum(rate(subscriber_committed_total[15s]))", None),
     ("publisher_subscriber_latency_ms", "subscriber_request_latency_milliseconds", "quantile"),
