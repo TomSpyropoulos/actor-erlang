@@ -10,6 +10,19 @@
 
 -define(SERVER, ?MODULE).
 
+%% Latency histogram bounds in milliseconds, shared verbatim with the Scala arm's Metrics.scala.
+%% Changing them in one repo silently destroys cross-arm latency comparability, and changing them
+%% at all invalidates comparison against any previously collected sweep. Declared as floats so the
+%% exposed `le` labels match the Scala client's formatting exactly. prometheus.erl converts these
+%% to native units at declare time (the name ends in _milliseconds), which is why observations
+%% arrive in native units — see observe_latency/1.
+-define(LATENCY_BUCKETS, [
+    0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4,
+    0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 75.0,
+    100.0, 150.0, 200.0, 300.0, 400.0, 500.0, 750.0, 1000.0, 1500.0, 2000.0, 3000.0, 5000.0,
+    7500.0, 10000.0, 20000.0, 60000.0
+]).
+
 %% --- API ---
 
 %% Starts the metrics gen_server and registers it locally so API functions can reach it.
@@ -24,17 +37,20 @@ inc_requests() ->
 inc_committed(N) ->
     prometheus_counter:inc(subscriber_committed_total, N).
 
-%% Records the subscriber-receive-to-now latency for the payload-timestamp summary.
-observe_latency(Latency) ->
-    prometheus_quantile_summary:observe(subscriber_request_latency_milliseconds, Latency).
+%% Records the subscriber-receive-to-now latency. Takes an integer in Erlang's native time unit:
+%% prometheus_histogram:observe/2 dispatches integers to a single ets:update_counter, while a float
+%% takes a path that rebuilds a 40-atom ETS match spec per observation — measured at +69% subscriber
+%% CPU at 20k msg/s. Native also keeps sub-millisecond resolution that integer ms would lose.
+observe_latency(LatencyNative) ->
+    prometheus_histogram:observe(subscriber_request_latency_milliseconds, LatencyNative).
 
-%% Records the end-to-end latency from payload timestamp to DB acknowledgement.
-observe_e2e_latency(Latency) ->
-    prometheus_quantile_summary:observe(subscriber_e2e_latency_milliseconds, Latency).
+%% Records the end-to-end latency from payload timestamp to DB acknowledgement, in native units.
+observe_e2e_latency(LatencyNative) ->
+    prometheus_histogram:observe(subscriber_e2e_latency_milliseconds, LatencyNative).
 
-%% Records the time elapsed between subscriber receive and DB write acknowledgement.
-observe_db_write_latency(Latency) ->
-    prometheus_quantile_summary:observe(subscriber_db_write_latency_milliseconds, Latency).
+%% Records the time elapsed between subscriber receive and DB write acknowledgement, in native units.
+observe_db_write_latency(LatencyNative) ->
+    prometheus_histogram:observe(subscriber_db_write_latency_milliseconds, LatencyNative).
 
 %% Updates the per-device liveness gauge to 1 (ALIVE) or 0 (MISSING) on every heartbeat.
 set_sensor_status(DeviceName, <<"ALIVE">>) ->
@@ -57,25 +73,28 @@ init([]) ->
         {help, "Total rows committed to the database."}
     ]),
 
-    prometheus_quantile_summary:declare([
+    %% duration_unit is deliberately left inferred from the _milliseconds suffix: prometheus.erl
+    %% then converts the bounds above to native units at declare time and converts _sum back on
+    %% exposition, so `le` labels and _sum stay in milliseconds and match the Scala arm exactly.
+    prometheus_histogram:declare([
         {name, subscriber_request_latency_milliseconds},
         {help, "Latency of requests in milliseconds (Now - Payload Timestamp)."},
         {labels, []},
-        {quantiles, [0.5, 0.95, 0.99, 0.999]}
+        {buckets, ?LATENCY_BUCKETS}
     ]),
 
-    prometheus_quantile_summary:declare([
+    prometheus_histogram:declare([
         {name, subscriber_e2e_latency_milliseconds},
         {help, "End-to-end latency in milliseconds (DB ack - Payload Timestamp)."},
         {labels, []},
-        {quantiles, [0.5, 0.95, 0.99, 0.999]}
+        {buckets, ?LATENCY_BUCKETS}
     ]),
 
-    prometheus_quantile_summary:declare([
+    prometheus_histogram:declare([
         {name, subscriber_db_write_latency_milliseconds},
         {help, "Latency from subscriber receive to DB write ack, in milliseconds."},
         {labels, []},
-        {quantiles, [0.5, 0.95, 0.99, 0.999]}
+        {buckets, ?LATENCY_BUCKETS}
     ]),
 
     prometheus_gauge:declare([

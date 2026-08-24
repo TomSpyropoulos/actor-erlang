@@ -10,6 +10,9 @@ COMPOSE=(docker compose -f "$REPO/docker-compose.yaml")
 # plus the database's initdb; ingestion covers broker connect and the first messages arriving.
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-180}"
 INGEST_TIMEOUT="${INGEST_TIMEOUT:-60}"
+# Startup transient excluded from every reported figure. Must be at least the 15s rate window used
+# by monitor.py's panels, or the first samples kept are still contaminated by the ramp.
+WARMUP_SECONDS="${WARMUP_SECONDS:-30}"
 SKIPPED_REPS=0
 
 MODE="${1:?Usage: $0 <scenario-file>|all}"
@@ -64,7 +67,7 @@ run_one() (
     echo "  Batch       : ${BATCH_ENABLED:-false}  (size=${BATCH_SIZE:-100}, timeout=${BATCH_TIMEOUT_MS:-1000}ms)"
     echo "  DB pool     : ${DB_POOL_SIZE:-20} workers"
     echo "  Backend     : ${DB_BACKEND:-timescaledb}"
-    [[ -n "${RUN_DURATION:-}" ]] && echo "  Duration    : ${RUN_DURATION}s (interval ${interval}s)"
+    [[ -n "${RUN_DURATION:-}" ]] && echo "  Duration    : ${RUN_DURATION}s (interval ${interval}s, warm-up ${WARMUP_SECONDS}s)"
     echo ""
 
     echo "Spinning up stack..."
@@ -105,12 +108,18 @@ run_one() (
     echo ""
     # Foreground so Ctrl+C reaches monitor.py directly in interactive mode; `|| true`
     # keeps `set -e` from short-circuiting before teardown runs when it returns.
+    # The gate waits above are the only place a slow runtime boot is observable: monitor.py starts
+    # counting from the first ingested message, so without passing them the JVM-vs-BEAM startup
+    # difference would be silently discarded rather than measured.
     "$VENV_DIR/bin/python" "$BENCH_DIR/monitor.py" \
         --prometheus-url "http://localhost:9090" \
         --interval "$interval" \
         --scenario-name "$(basename "$scenario")" \
         --output-dir "$BENCH_DIR/output" \
         --rep "$rep" \
+        --warmup "$WARMUP_SECONDS" \
+        --gate-startup-seconds "$waited" \
+        --gate-ingest-seconds "$ingest_waited" \
         "${duration_arg[@]}" || true
 )
 
@@ -136,10 +145,12 @@ run_reps() {
 if [[ "$MODE" == all ]]; then
     # Batch mode: fixed-duration run of every scenario, unattended, each repeated REPS times.
     # RUN_DURATION and REPS both default here since they only make sense for an unattended sweep
-    # (K=3 reps let run-to-run noise be told apart from a real runtime difference). Build the
+    # (K=3 reps let run-to-run noise be told apart from a real runtime difference). 90s leaves a
+    # full minute of steady state after the WARMUP_SECONDS trim and the 15s rate window. Build the
     # images once up front so no per-scenario/per-rep `up` ever pays a rebuild across the sweep.
-    : "${RUN_DURATION:=60}"; export RUN_DURATION
+    : "${RUN_DURATION:=90}"; export RUN_DURATION
     : "${REPS:=3}"; export REPS
+    export WARMUP_SECONDS
     shopt -s nullglob
     scenarios=("$BENCH_DIR"/scenarios/*.env)
     shopt -u nullglob

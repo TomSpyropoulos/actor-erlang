@@ -165,20 +165,22 @@ handle_result(flush_batch, #ts_state{batch_enabled = true,
     {no_match, State2};
 
 %% Claims a PostgreSQL ack matched by ref and computes latencies for each row in the pending map.
-handle_result({DB, Ref, _Result},
+%% A failed write yields no latencies, so the dispatcher counts nothing as committed: acking an
+%% error as a commit overstated committed_s under exactly the saturation it was meant to detect.
+handle_result({DB, Ref, Result},
               #ts_state{db_pid = DB, pending = P} = State) when is_reference(Ref) ->
     case maps:take(Ref, P) of
-        {{batch, Rows}, Rest} ->
-            %% Batch ack — compute latency for every row in the batch.
-            FlushTime = os:system_time(microsecond),
-            Latencies = [{max(0, FlushTime - MsgTs), max(0, FlushTime - ProcStart)}
-                         || {_, _, _, MsgTs, ProcStart} <- Rows],
-            {match, Latencies, State#ts_state{pending = Rest}};
-        {{MsgTs, ProcStart}, Rest} ->
-            %% Single-row ack (non-batching mode).
-            FlushTime = os:system_time(microsecond),
-            Latencies = [{max(0, FlushTime - MsgTs), max(0, FlushTime - ProcStart)}],
-            {match, Latencies, State#ts_state{pending = Rest}};
+        {Pending, Rest} ->
+            %% Take the ref on the error path too — leaving it behind leaks `pending` for the life
+            %% of the worker, the same ratcheting failure as the finding-2 timer leak.
+            State1 = State#ts_state{pending = Rest},
+            case is_error_result(Result) of
+                true ->
+                    logger:warning("db write failed, rows not committed: ~p", [Result]),
+                    {match, [], State1};
+                false ->
+                    {match, latencies_for(Pending), State1}
+            end;
         error ->
             {no_match, State}
     end;
@@ -186,6 +188,25 @@ handle_result({DB, Ref, _Result},
 %% Passes through messages not owned by this backend without modifying state.
 handle_result(_Msg, State) ->
     {no_match, State}.
+
+%% epgsql reports a failed statement as {error, _}; a multi-statement ack arrives as a list, so a
+%% single failure anywhere in it disqualifies the whole ack.
+is_error_result({error, _}) ->
+    true;
+is_error_result(Results) when is_list(Results) ->
+    lists:any(fun({error, _}) -> true; (_) -> false end, Results);
+is_error_result(_) ->
+    false.
+
+%% Builds one {E2EUs, SubToDbUs} pair per acknowledged row. The ack clock is read once per ack so
+%% every row in a batch shares one flush timestamp.
+latencies_for({batch, Rows}) ->
+    FlushTime = os:system_time(microsecond),
+    [{max(0, FlushTime - MsgTs), max(0, FlushTime - ProcStart)}
+     || {_, _, _, MsgTs, ProcStart} <- Rows];
+latencies_for({MsgTs, ProcStart}) ->
+    FlushTime = os:system_time(microsecond),
+    [{max(0, FlushTime - MsgTs), max(0, FlushTime - ProcStart)}].
 
 %% Closes the PostgreSQL connection cleanly when the pool worker shuts down.
 terminate(#ts_state{db_pid = DB}) ->

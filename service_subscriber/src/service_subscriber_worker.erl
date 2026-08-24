@@ -64,7 +64,9 @@ handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
 
     %% Reuse ProcessingStartUs to avoid a redundant syscall; cap at 0 for clock skew.
     LatencyUs = max(0, ProcessingStartUs - ST),
-    %% prometheus.erl expects native time units when the metric name ends in _milliseconds.
+
+    %% Native, not milliseconds: prometheus_histogram takes a cheap ets:update_counter path for
+    %% integers and an allocating match-spec rebuild for floats.
     NativeLatency = erlang:convert_time_unit(LatencyUs, microsecond, native),
 
     service_subscriber_metrics:inc_requests(),

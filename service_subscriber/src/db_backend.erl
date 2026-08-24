@@ -54,6 +54,8 @@
 %% {match, Latencies, NewState} if it recognises it as an async-query result
 %% it owns, where Latencies is a list of {E2EUs, SubToDbUs} pairs — one per
 %% row that was acknowledged (one for a single insert, N for a batch).
+%% An empty list claims the message but reports nothing committed, which is
+%% how a backend signals that the write it owned failed.
 %% The dispatcher records all latency pairs. Unrecognised messages must
 %% return {no_match, NewState}.
 -callback handle_result(Message :: term(), BackendState :: term()) ->

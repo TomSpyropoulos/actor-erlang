@@ -62,16 +62,35 @@ The Subscriber exposes the following Prometheus metrics on port `8081` (raw endp
 
 - `subscriber_requests_total`: Total count of MQTT messages **ingested** — incremented on receive, before the row reaches the database.
 - `subscriber_committed_total`: Total rows **committed** to the database — incremented on the DB write ack (by the batch size in batching mode, by 1 otherwise). Compare against `subscriber_requests_total`: the two track each other while the DB keeps up, and diverge once the write path saturates.
-- `subscriber_request_latency_milliseconds`: Latency from publisher send to subscriber receive, with quantiles (p50, p95, p99, p999).
-- `subscriber_e2e_latency_milliseconds`: End-to-end latency from publisher send to DB write ack, with quantiles (p50, p95, p99, p999).
-- `subscriber_db_write_latency_milliseconds`: Latency from subscriber receive to DB write ack, with quantiles (p50, p95, p99, p999).
+- `subscriber_request_latency_milliseconds`: Latency from publisher send to subscriber receive, as a histogram.
+- `subscriber_e2e_latency_milliseconds`: End-to-end latency from publisher send to DB write ack, as a histogram.
+- `subscriber_db_write_latency_milliseconds`: Latency from subscriber receive to DB write ack, as a histogram.
 - `subscriber_sensor_up{device="<name>"}`: Per-sensor liveness gauge — `1` = ALIVE, `0` = MISSING. Updated every heartbeat.
 
-Latency metrics use `prometheus_quantile_summary`, which computes percentiles client-side. The library expects values in Erlang's native time unit when the metric name ends in `_milliseconds`, and converts automatically for Grafana.
+All three latency metrics are Prometheus **histograms** over one bucket list (39 finite bounds from
+0.05 ms to 60 s) that is byte-identical to the other repo's, so both arms bucket the same
+observations the same way and quantiles are comparable by construction. Quantiles are computed at
+query time with `histogram_quantile()`, which means any quantile can be recomputed over any window
+after the fact — that is what lets the benchmark harness report steady state separately from the
+startup transient.
 
-> **Reading the quantiles.** `prometheus_quantile_summary` is backed by a DDSketch (`ddskerl`): observations are log-bucketed and each quantile is reported as a **bucket midpoint**, so the figures carry a *relative* error (≈1% by default), not an exact rank. A practical consequence: two summaries whose values differ by less than the bucket width report the **same** number. Under saturation, `subscriber_e2e_latency_milliseconds` and `subscriber_db_write_latency_milliseconds` differ only by the publisher→subscriber hop (~1–2 ms) on top of multi-second queueing delay — far below 1% — so they can print identical quantiles even though the underlying observations differ. The `_sum`/`_count` values are exact and can be used to confirm the real difference. Tightening this via the `error`/`bound` declare options is possible but must account for the values being in **native** (nanosecond) units, and an undersized `bound` fails when a quantile is *read*, not when it is observed.
->
-> Note this differs from the Scala service, whose Prometheus client uses a CKMS estimator returning actual observed samples. Tail figures are therefore **not strictly comparable** between the two implementations.
+> **Reading the quantiles.** `histogram_quantile()` interpolates linearly inside a bucket, so a
+> quantile is accurate to at most the width of the bucket it falls in — bounded, known in advance,
+> and bounded in *milliseconds*. A quantile falling in the `+Inf` bucket returns the highest finite
+> bound, so a saturated scenario reads as clamped at 60,000 ms. Both are covered by the `_sum` /
+> `_count` pair, which gives an exact mean that is neither quantized nor clamped; the benchmark
+> report carries it as a column beside every quantile for exactly this reason.
+
+Bucket bounds are declared in milliseconds, but observations are passed in Erlang's **native**
+time unit. prometheus.erl infers `duration_unit` from the `_milliseconds` suffix, converts the
+declared bounds to native at declare time, and converts `_sum` back on exposition — so `le` labels
+and `_sum` are milliseconds and match the Scala arm exactly, while the values crossing the hot path
+stay integers.
+
+That distinction is load-bearing, not incidental. `prometheus_histogram:observe/2` dispatches an
+integer to a single `ets:update_counter`, but sends a **float** down a path that rebuilds a
+match spec — one `list_to_atom` per bucket — on *every* observation. With 39 buckets at 20k msg/s
+that measured **+69% subscriber CPU** and cost ~4% throughput. Never pass a float here.
 
 ## 🔍 Missing Sensor Detection
 

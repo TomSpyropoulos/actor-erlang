@@ -79,6 +79,10 @@ handle_cast(_Msg, State) ->
 %% Forwards every incoming message to the backend, counts committed rows, and records returned latency pairs.
 handle_info(Msg, #state{backend_mod = Mod, backend_state = BS} = S) ->
     case Mod:handle_result(Msg, BS) of
+        %% A claimed ack carrying no latencies is a failed write: nothing committed, nothing to
+        %% record. Counting it would inflate committed_s precisely when writes start failing.
+        {match, [], NewBS} ->
+            {noreply, S#state{backend_state = NewBS}};
         {match, Latencies, NewBS} ->
             %% Count rows as committed only once the backend acks the write; one latency entry per row.
             service_subscriber_metrics:inc_committed(length(Latencies)),
@@ -112,7 +116,9 @@ resolve_backend() ->
         Unknown       -> error({unknown_db_backend, Unknown})
     end.
 
-%% Converts microsecond latency pairs to native time units and forwards them to the Prometheus summaries.
+%% Converts a microsecond latency pair to native time units and forwards it to the histograms.
+%% Native keeps observations integral, which is the difference between one ets:update_counter and
+%% a per-observation match-spec rebuild.
 record_latencies(E2EUs, SubToDbUs) ->
     service_subscriber_metrics:observe_e2e_latency(
         erlang:convert_time_unit(E2EUs, microsecond, native)),

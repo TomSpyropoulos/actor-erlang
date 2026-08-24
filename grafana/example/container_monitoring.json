@@ -468,14 +468,62 @@
             "uid": "my-prometheus-datasource"
           },
           "editorMode": "code",
-          "expr": "subscriber_request_latency_milliseconds",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(subscriber_request_latency_milliseconds_bucket[$__rate_interval])))",
           "instant": false,
-          "legendFormat": "P{{quantile}}",
+          "legendFormat": "P50",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(subscriber_request_latency_milliseconds_bucket[$__rate_interval])))",
+          "instant": false,
+          "legendFormat": "P95",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(subscriber_request_latency_milliseconds_bucket[$__rate_interval])))",
+          "instant": false,
+          "legendFormat": "P99",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.999, sum by (le) (rate(subscriber_request_latency_milliseconds_bucket[$__rate_interval])))",
+          "instant": false,
+          "legendFormat": "P999",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "editorMode": "code",
+          "expr": "rate(subscriber_request_latency_milliseconds_sum[$__rate_interval]) / rate(subscriber_request_latency_milliseconds_count[$__rate_interval])",
+          "instant": false,
+          "legendFormat": "mean",
+          "range": true,
+          "refId": "E"
         }
       ],
-      "title": "Publisher \u2192 Subscriber Latencies [Milliseconds]",
+      "title": "Publisher → Subscriber Latencies [Milliseconds]",
       "type": "barchart"
     },
     {
@@ -564,14 +612,62 @@
             "uid": "my-prometheus-datasource"
           },
           "editorMode": "code",
-          "expr": "subscriber_e2e_latency_milliseconds",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(subscriber_e2e_latency_milliseconds_bucket[$__rate_interval])))",
           "instant": false,
-          "legendFormat": "P{{quantile}}",
+          "legendFormat": "P50",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(subscriber_e2e_latency_milliseconds_bucket[$__rate_interval])))",
+          "instant": false,
+          "legendFormat": "P95",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(subscriber_e2e_latency_milliseconds_bucket[$__rate_interval])))",
+          "instant": false,
+          "legendFormat": "P99",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.999, sum by (le) (rate(subscriber_e2e_latency_milliseconds_bucket[$__rate_interval])))",
+          "instant": false,
+          "legendFormat": "P999",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "editorMode": "code",
+          "expr": "rate(subscriber_e2e_latency_milliseconds_sum[$__rate_interval]) / rate(subscriber_e2e_latency_milliseconds_count[$__rate_interval])",
+          "instant": false,
+          "legendFormat": "mean",
+          "range": true,
+          "refId": "E"
         }
       ],
-      "title": "Publisher \u2192 DB E2E Latencies [Milliseconds]",
+      "title": "Publisher → DB E2E Latencies [Milliseconds]",
       "type": "barchart"
     },
     {
@@ -732,15 +828,132 @@
             "uid": "my-prometheus-datasource"
           },
           "editorMode": "code",
-          "expr": "subscriber_db_write_latency_milliseconds",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(subscriber_db_write_latency_milliseconds_bucket[$__rate_interval])))",
           "instant": false,
-          "legendFormat": "P{{quantile}}",
+          "legendFormat": "P50",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(subscriber_db_write_latency_milliseconds_bucket[$__rate_interval])))",
+          "instant": false,
+          "legendFormat": "P95",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(subscriber_db_write_latency_milliseconds_bucket[$__rate_interval])))",
+          "instant": false,
+          "legendFormat": "P99",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.999, sum by (le) (rate(subscriber_db_write_latency_milliseconds_bucket[$__rate_interval])))",
+          "instant": false,
+          "legendFormat": "P999",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "editorMode": "code",
+          "expr": "rate(subscriber_db_write_latency_milliseconds_sum[$__rate_interval]) / rate(subscriber_db_write_latency_milliseconds_count[$__rate_interval])",
+          "instant": false,
+          "legendFormat": "mean",
+          "range": true,
+          "refId": "E"
+        }
+      ],
+      "title": "Subscriber → DB Write Latency [Milliseconds]",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "my-prometheus-datasource"
+      },
+      "id": 11,
+      "type": "heatmap",
+      "title": "Publisher → DB E2E Latency Distribution [ Heatmap ]",
+      "description": "Bucket counts over time. Only possible because the latency metrics are histograms; it shows the startup latency excursion as it happens rather than diluted into a run average.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "pluginVersion": "12.4.1",
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "cellValues": {},
+        "color": {
+          "mode": "scheme",
+          "scheme": "Turbo",
+          "steps": 64,
+          "reverse": false,
+          "exponent": 0.5,
+          "fill": "dark-orange",
+          "min": 0
+        },
+        "exemplars": {
+          "color": "rgba(255,0,255,0.7)"
+        },
+        "filterValues": {
+          "le": 1e-09
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "showValue": "never",
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": false,
+          "yHistogram": false
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "reverse": false,
+          "unit": "ms"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "my-prometheus-datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(subscriber_e2e_latency_milliseconds_bucket[$__rate_interval])) by (le)",
+          "format": "heatmap",
+          "instant": false,
+          "legendFormat": "{{le}}",
           "range": true,
           "refId": "A"
         }
-      ],
-      "title": "Subscriber \u2192 DB Write Latency [Milliseconds]",
-      "type": "barchart"
+      ]
     }
   ],
   "preload": false,
