@@ -175,10 +175,6 @@ The no-batch-vs-batch comparison is the `Batching` group: `timescale_batching_of
 |-------|--------|-------------|
 | `timescaledb` (default) | `db_backend_timescaledb` | PostgreSQL/TimescaleDB via epgsql, async writes |
 
-### TODO / Planned
-
-- **Resource limits** — neither `docker-compose.yaml` sets `cpus` or `mem_limit`, and the JVM/BEAM size their heaps, GC and scheduler counts from host properties. Both runtimes are therefore sized by whatever machine ran the sweep.
-
 ## 🧠 Deep Dive: Erlang Concurrency
 
 ### Lightweight Processes vs. OS Threads
