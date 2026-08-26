@@ -17,9 +17,10 @@
 
 %% Submit one sensor-data row.
 %%
-%% MsgTimestampUs and ProcStartUs are passed through so the backend can
-%% compute e2e and subscriber->DB latencies on acknowledgement; they are
-%% not written to the database.
+%% MsgTimestampUs is both the value written to the Timestamp column and the
+%% start of the e2e latency measurement; the backend converts it to whatever
+%% representation its driver wants, so no DB-shaped type crosses this contract.
+%% ProcStartUs is passed through only to compute the subscriber->DB latency.
 %%
 %% Return {async, NewState} if the write was dispatched asynchronously.
 %% An ack will arrive later as a message to the dispatcher process;
@@ -36,7 +37,6 @@
 -callback insert(BackendState    :: term(),
                  DeviceName      :: binary(),
                  Value           :: integer(),
-                 Timestamp       :: term(),
                  MsgTimestampUs  :: integer(),
                  ProcStartUs     :: integer()) ->
     {async,    NewBackendState :: term()} |

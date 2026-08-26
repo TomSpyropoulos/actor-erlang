@@ -29,7 +29,7 @@
 -include_lib("epgsql/include/epgsql.hrl").
 -include_lib("kernel/include/logger.hrl").
 
--export([init/1, insert/6, insert_status/3, handle_result/2, terminate/1]).
+-export([init/1, insert/5, insert_status/3, handle_result/2, terminate/1]).
 
 -record(ts_state, {
     db_pid             :: pid(),
@@ -43,7 +43,8 @@
     batch_enabled      :: boolean(),
     batch_size         :: integer(),
     batch_timeout_ms   :: integer(),
-    %% Buffer: list of {DeviceName, Value, ErlTimestamp, MsgTs, ProcStart}
+    %% Buffer: list of {DeviceName, Value, MsgTs, ProcStart}; the timestamptz value is derived
+    %% from MsgTs at flush time, inside the pass that already builds the unnest arrays.
     buffer             :: list(),
     %% Row count in `buffer`, tracked separately to avoid an O(n) length/1 scan on every insert
     buffer_count       :: non_neg_integer(),
@@ -105,7 +106,7 @@ init(Index) ->
         self_pid           = SelfPid
     },
 
-    %% No timer is armed here: the first buffered row arms it via insert/6. Arming one against
+    %% No timer is armed here: the first buffered row arms it via insert/5. Arming one against
     %% an empty buffer only schedules a wake-up with nothing to flush. Mirrors the Scala
     %% DbWriterActor, which likewise arms nothing at construction.
     {ok, State}.
@@ -114,9 +115,9 @@ init(Index) ->
 insert(#ts_state{batch_enabled = false,
                  db_pid = DB, insert_stmt = Stmt,
                  pending = P} = State,
-       DeviceName, Value, ErlTimestamp, MsgTs, ProcStart) ->
+       DeviceName, Value, MsgTs, ProcStart) ->
     #statement{types = Types} = Stmt,
-    TypedParams = lists:zip(Types, [DeviceName, Value, ErlTimestamp]),
+    TypedParams = lists:zip(Types, [DeviceName, Value, micros_to_datetime(MsgTs)]),
     Ref = epgsqla:prepared_query(DB, Stmt, TypedParams),
     {async, State#ts_state{pending = P#{Ref => {MsgTs, ProcStart}}}};
 
@@ -124,8 +125,8 @@ insert(#ts_state{batch_enabled = false,
 %% Uses a tracked counter instead of length/1 so the check stays O(1) regardless of batch size.
 insert(#ts_state{batch_enabled = true,
                  buffer = Buf, buffer_count = Count, batch_size = BatchSize} = State,
-       DeviceName, Value, ErlTimestamp, MsgTs, ProcStart) ->
-    Row = {DeviceName, Value, ErlTimestamp, MsgTs, ProcStart},
+       DeviceName, Value, MsgTs, ProcStart) ->
+    Row = {DeviceName, Value, MsgTs, ProcStart},
     NewBuf = [Row | Buf],
     NewCount = Count + 1,
     State1 = State#ts_state{buffer = NewBuf, buffer_count = NewCount},
@@ -151,7 +152,7 @@ insert_status(#ts_state{db_pid = DB, insert_status_stmt = Stmt} = State,
     {ok, State}.
 
 %% Flushes any buffered rows when the timeout fires. Deliberately does NOT re-arm: the next row to
-%% arrive re-arms via the NewCount =:= 1 branch in insert/6, so at most one timer is ever live per
+%% arrive re-arms via the NewCount =:= 1 branch in insert/5, so at most one timer is ever live per
 %% buffering cycle. Re-arming unconditionally here is what let a leaked timer replace itself on every
 %% firing, so the live-timer count could only ever grow.
 handle_result(flush_batch, #ts_state{batch_enabled = true,
@@ -203,7 +204,7 @@ is_error_result(_) ->
 latencies_for({batch, Rows}) ->
     FlushTime = os:system_time(microsecond),
     [{max(0, FlushTime - MsgTs), max(0, FlushTime - ProcStart)}
-     || {_, _, _, MsgTs, ProcStart} <- Rows];
+     || {_, _, MsgTs, ProcStart} <- Rows];
 latencies_for({MsgTs, ProcStart}) ->
     FlushTime = os:system_time(microsecond),
     [{max(0, FlushTime - MsgTs), max(0, FlushTime - ProcStart)}].
@@ -227,9 +228,9 @@ flush(#ts_state{db_pid = DB, batch_insert_stmt = Stmt,
         _         -> erlang:cancel_timer(TRef)
     end,
     Rows = lists:reverse(Buf),
-    Names      = [N  || {N, _, _,  _, _} <- Rows],
-    Values     = [V  || {_, V, _,  _, _} <- Rows],
-    Timestamps = [Ts || {_, _, Ts, _, _} <- Rows],
+    Names      = [N  || {N, _, _, _} <- Rows],
+    Values     = [V  || {_, V, _, _} <- Rows],
+    Timestamps = [micros_to_datetime(MsgTs) || {_, _, MsgTs, _} <- Rows],
     #statement{types = Types} = Stmt,
     TypedParams = lists:zip(Types, [Names, Values, Timestamps]),
     Ref = epgsqla:prepared_query(DB, Stmt, TypedParams),
@@ -239,6 +240,14 @@ flush(#ts_state{db_pid = DB, batch_insert_stmt = Stmt,
         timer_ref    = undefined,
         pending      = P#{Ref => {batch, Rows}}
     }.
+
+%% Converts epoch microseconds to the {{Y,Mo,D},{H,Mi,SecFloat}} tuple epgsql binds to timestamptz.
+%% Fractional seconds carry the microseconds, so the wire format's full precision reaches the column.
+micros_to_datetime(Us) ->
+    Secs  = Us div 1000000,
+    Micro = Us rem 1000000,
+    {{Y, Mo, D}, {H, Mi, S}} = calendar:system_time_to_universal_time(Secs, second),
+    {{Y, Mo, D}, {H, Mi, S + Micro / 1000000.0}}.
 
 %% Arms a one-shot timer to flush the buffer after batch_timeout_ms if no timer is already running.
 schedule_timer(#ts_state{timer_ref = undefined,

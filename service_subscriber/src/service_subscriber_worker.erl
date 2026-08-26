@@ -53,14 +53,14 @@ handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
     Value = maps:get(<<"value">>, Data),
     true = is_integer(Value),
 
-    %% fast_parse_timestamp returns {ErlTimestamp, MsgTimestampUs}.
-    %% ErlTimestamp is the epgsql datetime tuple; ST is microseconds since Unix epoch.
-    {ErlTimestamp, ST} = fast_parse_timestamp(Timestamp),
+    %% Microseconds since the Unix epoch. The DB-shaped form is built in the backend instead, so
+    %% nothing epgsql-specific travels through the worker or the dispatcher.
+    ST = fast_parse_timestamp(Timestamp),
 
     %% Capture now before the DB cast so the backend can later compute sub→DB latency.
     ProcessingStartUs = os:system_time(microsecond),
 
-    service_subscriber_db:insert(DeviceName, Value, ErlTimestamp, ST, ProcessingStartUs),
+    service_subscriber_db:insert(DeviceName, Value, ST, ProcessingStartUs),
 
     %% Reuse ProcessingStartUs to avoid a redundant syscall; cap at 0 for clock skew.
     LatencyUs = max(0, ProcessingStartUs - ST),
@@ -142,17 +142,10 @@ fast_parse_timestamp(<<Y1,Y2,Y3,Y4, $-, Mo1,Mo2, $-, D1,D2, $T, H1,H2, $:, Mi1,M
     Sec   = (S1 - $0) * 10 + (S2 - $0),
     Us    = (U1 - $0) * 100000 + (U2 - $0) * 10000 + (U3 - $0) * 1000
           + (U4 - $0) * 100 + (U5 - $0) * 10 + (U6 - $0),
-    ErlTimestamp = {{Year, Month, Day}, {Hour, Min, Sec + Us / 1000000.0}},
     GregorianSecs = calendar:datetime_to_gregorian_seconds({{Year, Month, Day}, {Hour, Min, Sec}}),
     UnixSecs = GregorianSecs - ?GREGORIAN_UNIX_OFFSET_S,
-    ST = UnixSecs * 1000000 + Us,
-    {ErlTimestamp, ST};
+    UnixSecs * 1000000 + Us;
 
 %% Fallback for anything not matching the tight pattern above (other precisions, non-UTC offset).
 fast_parse_timestamp(Timestamp) ->
-    ST = calendar:rfc3339_to_system_time(binary_to_list(Timestamp), [{unit, microsecond}]),
-    Secs = ST div 1000000,
-    Micro = ST rem 1000000,
-    {{Y, Mo, D}, {H, Mi, S}} = calendar:system_time_to_universal_time(Secs, second),
-    ErlTimestamp = {{Y, Mo, D}, {H, Mi, S + Micro / 1000000.0}},
-    {ErlTimestamp, ST}.
+    calendar:rfc3339_to_system_time(binary_to_list(Timestamp), [{unit, microsecond}]).

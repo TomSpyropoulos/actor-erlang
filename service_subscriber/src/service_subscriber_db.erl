@@ -13,7 +13,7 @@
 
 -include_lib("kernel/include/logger.hrl").
 
--export([start_link/1, init_counter/0, insert/5, insert_status/2]).
+-export([start_link/1, init_counter/0, insert/4, insert_status/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(COUNTER_KEY,   {?MODULE, round_robin_counter}).
@@ -37,9 +37,9 @@ init_counter() ->
     persistent_term:put(?POOL_SIZE_KEY, PoolSize).
 
 %% @doc Async insert of a sensor data row. Non-blocking for the caller.
-insert(DeviceName, Value, ErlTimestamp, MsgTimestampUs, ProcessingStartUs) ->
+insert(DeviceName, Value, MsgTimestampUs, ProcessingStartUs) ->
     gen_server:cast(worker_name(next_index()),
-                    {insert, DeviceName, Value, ErlTimestamp, MsgTimestampUs, ProcessingStartUs}).
+                    {insert, DeviceName, Value, MsgTimestampUs, ProcessingStartUs}).
 
 %% @doc Async insert of a sensor status change row. Non-blocking for the caller.
 insert_status(DeviceName, Status) ->
@@ -56,9 +56,9 @@ handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
 %% Routes an async sensor-data insert to the backend and records latencies if the write was synchronous.
-handle_cast({insert, DeviceName, Value, ErlTs, MsgTs, ProcStart},
+handle_cast({insert, DeviceName, Value, MsgTs, ProcStart},
             #state{backend_mod = Mod, backend_state = BS} = S) ->
-    case Mod:insert(BS, DeviceName, Value, ErlTs, MsgTs, ProcStart) of
+    case Mod:insert(BS, DeviceName, Value, MsgTs, ProcStart) of
         {async,    NewBS}           -> {noreply, S#state{backend_state = NewBS}};
         {buffered, NewBS}           -> {noreply, S#state{backend_state = NewBS}};
         {sync, {E2E, Sub}, NewBS}   ->

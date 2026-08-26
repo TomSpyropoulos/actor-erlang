@@ -157,7 +157,7 @@ The no-batch-vs-batch comparison is the `Batching` group: `timescale_batching_of
 |----------|---------|-------------|
 | `PUBLISHER_COUNT` | `1` | Number of publisher containers (`--scale publisher=N`) |
 | `DB_BACKEND` | `timescaledb` | Backend module to use |
-| `DB_POOL_SIZE` | `20` | Number of DB pool workers |
+| `DB_POOL_SIZE` | `20` | Number of DB pool workers, and the total PostgreSQL connection count (one per worker). Status writes round-robin over the same pool |
 | `BATCH_ENABLED` | `false` | Enable row buffering |
 | `BATCH_SIZE` | `100` | Flush when buffer reaches this many rows |
 | `BATCH_TIMEOUT_MS` | `1000` | Flush after this many ms even if buffer is not full |
