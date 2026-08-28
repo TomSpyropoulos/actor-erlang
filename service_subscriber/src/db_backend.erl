@@ -5,17 +5,29 @@
 %% this behaviour. The active backend is selected at runtime via the DB_BACKEND
 %% environment variable (see service_subscriber_db:resolve_backend/0).
 %%
-%% To add a new backend: implement all five callbacks below, then add a clause
+%% Buffering is NOT part of this contract. The dispatcher owns the buffer, the
+%% BATCH_SIZE / BATCH_TIMEOUT_MS triggers and the flush timer, and calls either
+%% insert/5 (batching off) or insert_batch/2 (batching on). A backend therefore
+%% cannot re-implement batching, and cannot diverge from the other backends on
+%% what the swept batch factors mean.
+%%
+%% To add a new backend: implement all six callbacks below, then add a clause
 %% for its name string in service_subscriber_db:resolve_backend/0.
 -module(db_backend).
 
 %% Called once per pool worker at startup. Index is the worker's slot number
 %% (1..POOL_SIZE) and can be used to name per-worker resources such as
 %% prepared statements.
--callback init(Index :: non_neg_integer()) ->
+%%
+%% Opts carries the dispatcher's batching decision as #{batch_enabled => boolean()}.
+%% It is passed in rather than re-read from the environment so BATCH_ENABLED has a
+%% single reader; a backend should use it only to decide which resources to set up
+%% (e.g. skip preparing a batch statement that will never be executed).
+-callback init(Index :: non_neg_integer(),
+               Opts  :: #{batch_enabled := boolean()}) ->
     {ok, BackendState :: term()}.
 
-%% Submit one sensor-data row.
+%% Submit one sensor-data row. Called only when batching is off.
 %%
 %% MsgTimestampUs is both the value written to the Timestamp column and the
 %% start of the e2e latency measurement; the backend converts it to whatever
@@ -27,21 +39,31 @@
 %% handle_result/2 will be called for every subsequent message until the
 %% backend claims it and returns {match, Latencies, NewState}.
 %%
-%% Return {buffered, NewState} if the row was added to an internal buffer
-%% and no ack is expected yet. The backend will flush the buffer later
-%% (by batch size or timer) and return latencies via handle_result/2 at
-%% that point.
-%%
 %% Return {sync, {E2EUs, SubToDbUs}, NewState} if the write completed
-%% inline and the backend has already measured the latencies itself.
+%% inline and the backend has already measured the latency itself.
 -callback insert(BackendState    :: term(),
                  DeviceName      :: binary(),
                  Value           :: integer(),
                  MsgTimestampUs  :: integer(),
                  ProcStartUs     :: integer()) ->
-    {async,    NewBackendState :: term()} |
-    {buffered, NewBackendState :: term()} |
+    {async, NewBackendState :: term()} |
     {sync, {E2EUs :: integer(), SubToDbUs :: integer()}, NewBackendState :: term()}.
+
+%% Submit a whole flushed buffer as one write. Called only when batching is on.
+%%
+%% Rows are {DeviceName, Value, MsgTimestampUs, ProcStartUs} tuples in arrival
+%% order, with the same field meanings as insert/5. The dispatcher decides when
+%% this fires; the backend decides only how to write it (a multi-row statement,
+%% a driver-level batch, N single writes).
+%%
+%% Returns as insert/5, except that {sync, ...} carries one latency pair per row.
+-callback insert_batch(BackendState :: term(),
+                       Rows :: [{DeviceName     :: binary(),
+                                 Value          :: integer(),
+                                 MsgTimestampUs :: integer(),
+                                 ProcStartUs    :: integer()}]) ->
+    {async, NewBackendState :: term()} |
+    {sync, [{E2EUs :: integer(), SubToDbUs :: integer()}], NewBackendState :: term()}.
 
 %% Submit one sensor-status row. No latency tracking is required here.
 -callback insert_status(BackendState :: term(),

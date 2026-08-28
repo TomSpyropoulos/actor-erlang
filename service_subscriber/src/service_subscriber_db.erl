@@ -4,8 +4,15 @@
 %% operations are delegated to a backend module selected at startup via the
 %% DB_BACKEND environment variable (default: timescaledb).
 %%
-%% The backend is fully responsible for async correlation and latency
-%% computation. The dispatcher simply routes casts, forwards all incoming
+%% Batching lives here, not in the backend: this module owns the row buffer,
+%% the BATCH_SIZE / BATCH_TIMEOUT_MS triggers and the flush timer, and hands the
+%% backend either a single row (insert/5) or a whole flushed buffer
+%% (insert_batch/2). Every backend therefore sees identical batching semantics,
+%% which is what makes the swept batch factors comparable across backends.
+%% Mirrors the Scala BatchWriterActor -- keep the flush triggers in sync.
+%%
+%% The backend remains fully responsible for async correlation and latency
+%% computation. The dispatcher routes casts, forwards all other incoming
 %% messages to the backend via handle_result/2, and records the latency
 %% pairs the backend returns.
 -module(service_subscriber_db).
@@ -19,9 +26,24 @@
 -define(COUNTER_KEY,   {?MODULE, round_robin_counter}).
 -define(POOL_SIZE_KEY, {?MODULE, pool_size}).
 
+%% State of one pool worker.
+%% `backend_mod`: The db_backend implementation resolved from DB_BACKEND.
+%% `backend_state`: Opaque state owned by that backend.
+%% `batch_enabled`: Whether rows are buffered here before being handed to the backend.
+%% `batch_size`: Flush threshold in rows.
+%% `batch_timeout_ms`: Flush threshold in milliseconds since the first buffered row.
+%% `buffer`: Rows awaiting flush, newest first; reversed into arrival order on flush.
+%% `buffer_count`: Row count in `buffer`, tracked separately to avoid an O(n) length/1 scan per insert.
+%% `timer_ref`: The in-flight flush timer, or undefined when no buffering cycle is open.
 -record(state, {
-    backend_mod   :: module(),
-    backend_state :: term()
+    backend_mod      :: module(),
+    backend_state    :: term(),
+    batch_enabled    :: boolean(),
+    batch_size       :: pos_integer(),
+    batch_timeout_ms :: pos_integer(),
+    buffer           :: list(),
+    buffer_count     :: non_neg_integer(),
+    timer_ref        :: reference() | undefined
 }).
 
 %% Starts a named DB dispatcher gen_server for the given pool index.
@@ -45,28 +67,53 @@ insert(DeviceName, Value, MsgTimestampUs, ProcessingStartUs) ->
 insert_status(DeviceName, Status) ->
     gen_server:cast(worker_name(next_index()), {insert_status, DeviceName, Status}).
 
-%% Resolves the configured backend module and delegates initialisation to it.
+%% Reads the batching config (the only place it is read), then resolves the backend module and
+%% delegates initialisation to it, passing batch_enabled so it can skip resources it will never use.
+%% No timer is armed here: the first buffered row arms it, and arming one against an empty buffer
+%% only schedules a wake-up with nothing to flush.
 init([Index]) ->
-    BackendMod = resolve_backend(),
-    {ok, BackendState} = BackendMod:init(Index),
-    {ok, #state{backend_mod = BackendMod, backend_state = BackendState}}.
+    BatchEnabled = os:getenv("BATCH_ENABLED", "false") =:= "true",
+    BatchSize    = list_to_integer(os:getenv("BATCH_SIZE",       "100")),
+    BatchTimeMs  = list_to_integer(os:getenv("BATCH_TIMEOUT_MS", "1000")),
+    BackendMod   = resolve_backend(),
+    {ok, BackendState} = BackendMod:init(Index, #{batch_enabled => BatchEnabled}),
+    {ok, #state{backend_mod      = BackendMod,
+                backend_state    = BackendState,
+                batch_enabled    = BatchEnabled,
+                batch_size       = BatchSize,
+                batch_timeout_ms = BatchTimeMs,
+                buffer           = [],
+                buffer_count     = 0,
+                timer_ref        = undefined}}.
 
 %% No synchronous calls used; satisfy the callback contract.
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
-%% Routes an async sensor-data insert to the backend and records latencies if the write was synchronous.
+%% Hands the row straight to the backend when batching is off.
 handle_cast({insert, DeviceName, Value, MsgTs, ProcStart},
-            #state{backend_mod = Mod, backend_state = BS} = S) ->
-    case Mod:insert(BS, DeviceName, Value, MsgTs, ProcStart) of
-        {async,    NewBS}           -> {noreply, S#state{backend_state = NewBS}};
-        {buffered, NewBS}           -> {noreply, S#state{backend_state = NewBS}};
-        {sync, {E2E, Sub}, NewBS}   ->
-            record_latencies(E2E, Sub),
-            {noreply, S#state{backend_state = NewBS}}
+            #state{batch_enabled = false, backend_mod = Mod, backend_state = BS} = S) ->
+    {noreply, apply_insert_result(Mod:insert(BS, DeviceName, Value, MsgTs, ProcStart), S)};
+
+%% Appends the row to the buffer and flushes immediately when the batch size threshold is reached.
+%% Uses the tracked counter instead of length/1 so the check stays O(1) regardless of batch size.
+handle_cast({insert, DeviceName, Value, MsgTs, ProcStart},
+            #state{batch_enabled = true, buffer = Buf,
+                   buffer_count = Count, batch_size = BatchSize} = S) ->
+    NewCount = Count + 1,
+    S1 = S#state{buffer = [{DeviceName, Value, MsgTs, ProcStart} | Buf], buffer_count = NewCount},
+    if
+        NewCount >= BatchSize ->
+            %% Batch full — flush immediately.
+            {noreply, flush(S1)};
+        NewCount =:= 1 ->
+            %% First row in a new batch — ensure timer is running.
+            {noreply, schedule_timer(S1)};
+        true ->
+            {noreply, S1}
     end;
 
-%% Routes an async sensor-status insert to the backend.
+%% Routes an async sensor-status insert to the backend. Never buffered: volume is transition-only.
 handle_cast({insert_status, DeviceName, Status},
             #state{backend_mod = Mod, backend_state = BS} = S) ->
     {ok, NewBS} = Mod:insert_status(BS, DeviceName, Status),
@@ -76,23 +123,32 @@ handle_cast({insert_status, DeviceName, Status},
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% Forwards every incoming message to the backend, counts committed rows, and records returned latency pairs.
+%% Flushes any buffered rows when the timeout fires. Deliberately does NOT re-arm: the next row to
+%% arrive re-arms via the NewCount =:= 1 branch in handle_cast/2, so at most one timer is ever live
+%% per buffering cycle. Re-arming unconditionally here is what let a leaked timer replace itself on
+%% every firing, so the live-timer count could only ever grow.
+handle_info(flush_batch, #state{buffer = Buf} = State) ->
+    %% Cleared before flush/1 so it skips cancelling a timer that has already fired.
+    State1 = State#state{timer_ref = undefined},
+    case Buf of
+        [] -> {noreply, State1};
+        _  -> {noreply, flush(State1)}
+    end;
+
+%% Forwards every other incoming message to the backend, counts committed rows, and records
+%% returned latency pairs.
 handle_info(Msg, #state{backend_mod = Mod, backend_state = BS} = S) ->
     case Mod:handle_result(Msg, BS) of
-        %% A claimed ack carrying no latencies is a failed write: nothing committed, nothing to
-        %% record. Counting it would inflate committed_s precisely when writes start failing.
-        {match, [], NewBS} ->
-            {noreply, S#state{backend_state = NewBS}};
         {match, Latencies, NewBS} ->
-            %% Count rows as committed only once the backend acks the write; one latency entry per row.
-            service_subscriber_metrics:inc_committed(length(Latencies)),
-            lists:foreach(fun({E2E, Sub}) -> record_latencies(E2E, Sub) end, Latencies),
+            record_committed(Latencies),
             {noreply, S#state{backend_state = NewBS}};
         {no_match, NewBS} ->
             {noreply, S#state{backend_state = NewBS}}
     end.
 
 %% Delegates shutdown cleanup to the backend so it can close the DB connection gracefully.
+%% Buffered rows are not drained: a shutdown mid-run is already a failed run, and flushing here
+%% would emit a batch whose latencies are dominated by the shutdown itself.
 terminate(_Reason, #state{backend_mod = Mod, backend_state = BS}) ->
     Mod:terminate(BS).
 
@@ -115,6 +171,47 @@ resolve_backend() ->
         "timescaledb" -> db_backend_timescaledb;
         Unknown       -> error({unknown_db_backend, Unknown})
     end.
+
+%% Sends the whole buffer to the backend as one write and resets the buffering cycle.
+%% Cancels the pending flush timer first: clearing timer_ref without cancelling left the timer armed
+%% in the VM, so every size-triggered flush orphaned one. cancel_timer/1 returns false if it had
+%% already fired, leaving a stale flush_batch in the mailbox -- that costs at most one early flush
+%% and cannot accumulate. The Scala BatchWriterActor's timers.cancel has the same benign race.
+flush(#state{backend_mod = Mod, backend_state = BS, buffer = Buf, timer_ref = TRef} = S) ->
+    _ = case TRef of
+        undefined -> ok;
+        _         -> erlang:cancel_timer(TRef)
+    end,
+    S1 = S#state{buffer = [], buffer_count = 0, timer_ref = undefined},
+    apply_insert_result(Mod:insert_batch(BS, lists:reverse(Buf)), S1).
+
+%% Arms a one-shot timer to flush the buffer after batch_timeout_ms if no timer is already running.
+schedule_timer(#state{timer_ref = undefined, batch_timeout_ms = Ms} = State) ->
+    State#state{timer_ref = erlang:send_after(Ms, self(), flush_batch)};
+%% Returns state unchanged when a timer is already in flight to avoid double-scheduling.
+schedule_timer(State) ->
+    State.
+
+%% Stores the backend's new state and, for a backend that wrote synchronously, records the rows it
+%% already measured. Async writes report nothing here; their ack lands in handle_info/2 instead.
+apply_insert_result({async, NewBS}, S) ->
+    S#state{backend_state = NewBS};
+apply_insert_result({sync, {E2E, Sub}, NewBS}, S) ->
+    record_committed([{E2E, Sub}]),
+    S#state{backend_state = NewBS};
+apply_insert_result({sync, Latencies, NewBS}, S) when is_list(Latencies) ->
+    record_committed(Latencies),
+    S#state{backend_state = NewBS}.
+
+%% The single definition of "these rows are committed": one counter bump for the whole ack and one
+%% latency pair per row, so the sync and async paths cannot disagree on what a commit means.
+%% An empty list is a claimed-but-failed write: nothing committed, nothing recorded. Counting it
+%% would inflate committed_s precisely when writes start failing.
+record_committed([]) ->
+    ok;
+record_committed(Latencies) ->
+    service_subscriber_metrics:inc_committed(length(Latencies)),
+    lists:foreach(fun({E2E, Sub}) -> record_latencies(E2E, Sub) end, Latencies).
 
 %% Converts a microsecond latency pair to native time units and forwards it to the histograms.
 %% Native keeps observations integral, which is the difference between one ets:update_counter and

@@ -1,35 +1,31 @@
 %% @doc TimescaleDB (PostgreSQL) backend implementing the db_backend behaviour.
 %%
 %% One instance is held per pool worker. Prepared statements are parsed once
-%% at init/1 to avoid a parse round-trip on every write.
+%% at init/2 to avoid a parse round-trip on every write.
 %%
-%% Non-batching mode: each insert is dispatched asynchronously via epgsqla.
-%% The DB ack arrives as a {Pid, Ref, Result} message which handle_result/2
-%% claims by matching the worker's own db_pid. Latencies are computed
-%% internally and returned to the dispatcher as {match, [{E2E, Sub}], NewState}.
+%% This module does not buffer and does not own the batch triggers: the
+%% dispatcher (service_subscriber_db) does, and calls insert/5 or insert_batch/2
+%% accordingly. All that lives here is how a write is executed against epgsql
+%% and how its ack is correlated back to the rows it covered.
 %%
-%% Batching mode: rows are buffered in state until the batch reaches
-%% BATCH_SIZE or a BATCH_TIMEOUT_MS timer fires. On flush a single
-%% multi-row INSERT is sent via epgsqla:prepared_query/3. Latencies for all rows
-%% in the batch are computed on ack and returned as a list.
+%% Both write paths are dispatched asynchronously via epgsqla. The DB ack
+%% arrives as a {Pid, Ref, Result} message which handle_result/2 claims by
+%% matching the worker's own db_pid. Latencies are computed internally and
+%% returned to the dispatcher as {match, [{E2E, Sub}], NewState} -- one pair for
+%% a single insert, one per row for a batch.
 %%
 %% Connection parameters are read from environment variables at startup:
 %%   DB_HOST        (default: timescaledb)
 %%   DB_USER        (default: postgres)
 %%   DB_PASSWORD    (default: postgres)
 %%   DB_NAME        (default: epu)
-%%
-%% Batching parameters:
-%%   BATCH_ENABLED    (default: false)
-%%   BATCH_SIZE       (default: 100)
-%%   BATCH_TIMEOUT_MS (default: 1000)
 -module(db_backend_timescaledb).
 -behaviour(db_backend).
 
 -include_lib("epgsql/include/epgsql.hrl").
 -include_lib("kernel/include/logger.hrl").
 
--export([init/1, insert/5, insert_status/3, handle_result/2, terminate/1]).
+-export([init/2, insert/5, insert_batch/2, insert_status/3, handle_result/2, terminate/1]).
 
 -record(ts_state, {
     db_pid             :: pid(),
@@ -38,22 +34,13 @@
     batch_insert_stmt  :: #statement{} | undefined,
     %% Internal correlation map: epgsql Ref -> {MsgTimestampUs, ProcStartUs}
     %% or {batch, Rows} for batch acks
-    pending            :: #{reference() => {integer(), integer()} | {batch, list()}},
-    %% Batching config
-    batch_enabled      :: boolean(),
-    batch_size         :: integer(),
-    batch_timeout_ms   :: integer(),
-    %% Buffer: list of {DeviceName, Value, MsgTs, ProcStart}; the timestamptz value is derived
-    %% from MsgTs at flush time, inside the pass that already builds the unnest arrays.
-    buffer             :: list(),
-    %% Row count in `buffer`, tracked separately to avoid an O(n) length/1 scan on every insert
-    buffer_count       :: non_neg_integer(),
-    timer_ref          :: reference() | undefined,
-    self_pid           :: pid()
+    pending            :: #{reference() => {integer(), integer()} | {batch, list()}}
 }).
 
-%% Opens a PostgreSQL connection, pre-parses prepared statements, and configures batching from env vars.
-init(Index) ->
+%% Opens a PostgreSQL connection and pre-parses the prepared statements this worker will use.
+%% The batch statement is prepared only when the dispatcher says batching is on, so a non-batch
+%% run does not pay an extra parse per worker at startup.
+init(Index, #{batch_enabled := BatchEnabled}) ->
     Host   = os:getenv("DB_HOST",     "timescaledb"),
     User   = os:getenv("DB_USER",     "postgres"),
     Pass   = os:getenv("DB_PASSWORD", "postgres"),
@@ -72,12 +59,7 @@ init(Index) ->
         "INSERT INTO sensor_status (DeviceName, Status) VALUES ($1, $2)",
         []),
 
-    BatchEnabled = os:getenv("BATCH_ENABLED", "false") =:= "true",
-    BatchSize    = list_to_integer(os:getenv("BATCH_SIZE",       "100")),
-    BatchTimeMs  = list_to_integer(os:getenv("BATCH_TIMEOUT_MS", "1000")),
-    SelfPid      = self(),
-
-    %% Pre-parse the unnest batch statement once so flush/1 can reuse it
+    %% Pre-parse the unnest batch statement once so insert_batch/2 can reuse it
     %% for any batch size without a per-flush parse round-trip.
     BatchInsertStmt = case BatchEnabled of
         true ->
@@ -91,57 +73,35 @@ init(Index) ->
             undefined
     end,
 
-    State = #ts_state{
+    {ok, #ts_state{
         db_pid             = DB,
         insert_stmt        = InsertStmt,
         insert_status_stmt = InsertStatusStmt,
         batch_insert_stmt  = BatchInsertStmt,
-        pending            = #{},
-        batch_enabled      = BatchEnabled,
-        batch_size         = BatchSize,
-        batch_timeout_ms   = BatchTimeMs,
-        buffer             = [],
-        buffer_count       = 0,
-        timer_ref          = undefined,
-        self_pid           = SelfPid
-    },
-
-    %% No timer is armed here: the first buffered row arms it via insert/5. Arming one against
-    %% an empty buffer only schedules a wake-up with nothing to flush. Mirrors the Scala
-    %% DbWriterActor, which likewise arms nothing at construction.
-    {ok, State}.
+        pending            = #{}
+    }}.
 
 %% Sends a single async prepared-query to PostgreSQL and stores the ref for later latency computation.
-insert(#ts_state{batch_enabled = false,
-                 db_pid = DB, insert_stmt = Stmt,
-                 pending = P} = State,
+insert(#ts_state{db_pid = DB, insert_stmt = Stmt, pending = P} = State,
        DeviceName, Value, MsgTs, ProcStart) ->
     #statement{types = Types} = Stmt,
     TypedParams = lists:zip(Types, [DeviceName, Value, micros_to_datetime(MsgTs)]),
     Ref = epgsqla:prepared_query(DB, Stmt, TypedParams),
-    {async, State#ts_state{pending = P#{Ref => {MsgTs, ProcStart}}}};
+    {async, State#ts_state{pending = P#{Ref => {MsgTs, ProcStart}}}}.
 
-%% Appends the row to the in-memory buffer and flushes immediately when the batch size threshold is reached.
-%% Uses a tracked counter instead of length/1 so the check stays O(1) regardless of batch size.
-insert(#ts_state{batch_enabled = true,
-                 buffer = Buf, buffer_count = Count, batch_size = BatchSize} = State,
-       DeviceName, Value, MsgTs, ProcStart) ->
-    Row = {DeviceName, Value, MsgTs, ProcStart},
-    NewBuf = [Row | Buf],
-    NewCount = Count + 1,
-    State1 = State#ts_state{buffer = NewBuf, buffer_count = NewCount},
-    if
-        NewCount >= BatchSize ->
-            %% Batch full — flush immediately.
-            State2 = flush(State1),
-            {async, State2};
-        NewCount =:= 1 ->
-            %% First row in a new batch — ensure timer is running.
-            State2 = schedule_timer(State1),
-            {buffered, State2};
-        true ->
-            {buffered, State1}
-    end.
+%% Sends a flushed buffer as a single unnest INSERT and registers the batch ref for latency tracking.
+%% Three array parameters keep the SQL text fixed at any batch size, which is what lets the statement
+%% be parsed once at init. Mirrors the Scala TimescaleBatchTarget -- keep the two in sync.
+insert_batch(#ts_state{db_pid = DB, batch_insert_stmt = Stmt, pending = P} = State, Rows) ->
+    Names      = [N  || {N, _, _, _} <- Rows],
+    Values     = [V  || {_, V, _, _} <- Rows],
+    %% The DB-shaped timestamp is derived here, inside the pass that already builds the arrays,
+    %% so nothing epgsql-specific has to travel down from the worker.
+    Timestamps = [micros_to_datetime(MsgTs) || {_, _, MsgTs, _} <- Rows],
+    #statement{types = Types} = Stmt,
+    TypedParams = lists:zip(Types, [Names, Values, Timestamps]),
+    Ref = epgsqla:prepared_query(DB, Stmt, TypedParams),
+    {async, State#ts_state{pending = P#{Ref => {batch, Rows}}}}.
 
 %% Fires an async prepared query to record a sensor status change; the ack is intentionally ignored.
 insert_status(#ts_state{db_pid = DB, insert_status_stmt = Stmt} = State,
@@ -150,20 +110,6 @@ insert_status(#ts_state{db_pid = DB, insert_status_stmt = Stmt} = State,
     TypedParams = lists:zip(Types, [DeviceName, Status]),
     epgsqla:prepared_query(DB, Stmt, TypedParams),
     {ok, State}.
-
-%% Flushes any buffered rows when the timeout fires. Deliberately does NOT re-arm: the next row to
-%% arrive re-arms via the NewCount =:= 1 branch in insert/5, so at most one timer is ever live per
-%% buffering cycle. Re-arming unconditionally here is what let a leaked timer replace itself on every
-%% firing, so the live-timer count could only ever grow.
-handle_result(flush_batch, #ts_state{batch_enabled = true,
-                                      buffer = Buf} = State) ->
-    %% Cleared before flush/1 so it skips cancelling a timer that has already fired.
-    State1 = State#ts_state{timer_ref = undefined},
-    State2 = case Buf of
-        [] -> State1;
-        _  -> flush(State1)
-    end,
-    {no_match, State2};
 
 %% Claims a PostgreSQL ack matched by ref and computes latencies for each row in the pending map.
 %% A failed write yields no latencies, so the dispatcher counts nothing as committed: acking an
@@ -190,6 +136,13 @@ handle_result({DB, Ref, Result},
 handle_result(_Msg, State) ->
     {no_match, State}.
 
+%% Closes the PostgreSQL connection cleanly when the pool worker shuts down.
+terminate(#ts_state{db_pid = DB}) ->
+    epgsql:close(DB),
+    ok.
+
+%% --- Internal helpers ---
+
 %% epgsql reports a failed statement as {error, _}; a multi-statement ack arrives as a list, so a
 %% single failure anywhere in it disqualifies the whole ack.
 is_error_result({error, _}) ->
@@ -209,38 +162,6 @@ latencies_for({MsgTs, ProcStart}) ->
     FlushTime = os:system_time(microsecond),
     [{max(0, FlushTime - MsgTs), max(0, FlushTime - ProcStart)}].
 
-%% Closes the PostgreSQL connection cleanly when the pool worker shuts down.
-terminate(#ts_state{db_pid = DB}) ->
-    epgsql:close(DB),
-    ok.
-
-%% --- Internal helpers ---
-
-%% Sends the entire buffer as a single unnest INSERT and registers the batch ref for latency tracking.
-%% Cancels the pending flush timer first: clearing timer_ref without cancelling left the timer armed in
-%% the VM, so every size-triggered flush orphaned one. cancel_timer/1 returns false if it had already
-%% fired, leaving a stale flush_batch in the mailbox -- that costs at most one early flush and cannot
-%% accumulate. The Scala DbWriterActor's timers.cancel has the same benign race.
-flush(#ts_state{db_pid = DB, batch_insert_stmt = Stmt,
-                buffer = Buf, pending = P, timer_ref = TRef} = State) ->
-    _ = case TRef of
-        undefined -> ok;
-        _         -> erlang:cancel_timer(TRef)
-    end,
-    Rows = lists:reverse(Buf),
-    Names      = [N  || {N, _, _, _} <- Rows],
-    Values     = [V  || {_, V, _, _} <- Rows],
-    Timestamps = [micros_to_datetime(MsgTs) || {_, _, MsgTs, _} <- Rows],
-    #statement{types = Types} = Stmt,
-    TypedParams = lists:zip(Types, [Names, Values, Timestamps]),
-    Ref = epgsqla:prepared_query(DB, Stmt, TypedParams),
-    State#ts_state{
-        buffer       = [],
-        buffer_count = 0,
-        timer_ref    = undefined,
-        pending      = P#{Ref => {batch, Rows}}
-    }.
-
 %% Converts epoch microseconds to the {{Y,Mo,D},{H,Mi,SecFloat}} tuple epgsql binds to timestamptz.
 %% Fractional seconds carry the microseconds, so the wire format's full precision reaches the column.
 micros_to_datetime(Us) ->
@@ -248,13 +169,3 @@ micros_to_datetime(Us) ->
     Micro = Us rem 1000000,
     {{Y, Mo, D}, {H, Mi, S}} = calendar:system_time_to_universal_time(Secs, second),
     {{Y, Mo, D}, {H, Mi, S + Micro / 1000000.0}}.
-
-%% Arms a one-shot timer to flush the buffer after batch_timeout_ms if no timer is already running.
-schedule_timer(#ts_state{timer_ref = undefined,
-                          batch_timeout_ms = Ms,
-                          self_pid = Pid} = State) ->
-    Ref = erlang:send_after(Ms, Pid, flush_batch),
-    State#ts_state{timer_ref = Ref};
-%% Returns state unchanged when a timer is already in flight to avoid double-scheduling.
-schedule_timer(State) ->
-    State.
