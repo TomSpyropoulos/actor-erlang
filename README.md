@@ -37,7 +37,10 @@ docker compose up -d --build --scale publisher=3
     - `subscriber_request_latency_milliseconds` — publisher→subscriber latency, histogram.
     - `subscriber_e2e_latency_milliseconds` — publisher→DB latency, histogram.
     - `subscriber_db_write_latency_milliseconds` — subscriber→DB write latency, histogram.
-    - All three share one bucket list with the other repo, so quantiles are comparable across arms
+    - `subscriber_reads_total` — completed read queries, counter. Driven by the subscriber's own
+      readers rather than by ingest traffic, so it stays at 0 unless `READS_PER_SEC` is set.
+    - `subscriber_read_latency_milliseconds` — read query latency, histogram.
+    - All four share one bucket list with the other repo, so quantiles are comparable across arms
       by construction; `histogram_quantile()` computes them at query time over any window.
     - `subscriber_sensor_up{device="<name>"}` — per-sensor liveness gauge (1 = ALIVE, 0 = MISSING).
 - **Subscriber Logs**:
@@ -110,11 +113,11 @@ RUN_DURATION=90 ./bench.sh benchmarking/scenarios/timescale_load_p20.env
 
 ### Available scenarios
 
-All 25 scenarios follow a **one-factor-at-a-time (OFAT)** design: every file changes exactly one variable from a shared **anchor** (`20` publishers ≈ 20k msg/s, pool `20`, batching on at size `50` / timeout `200`ms, no payload padding), so any measured effect is attributable to that one factor.
+All 30 scenarios follow a **one-factor-at-a-time (OFAT)** design: every file changes exactly one variable from a shared **anchor** (`20` publishers ≈ 20k msg/s, pool `20`, batching on at size `50` / timeout `200`ms, no payload padding), so any measured effect is attributable to that one factor.
 
 The anchor batches because the single-row write path cannot sustain 20k msg/s: rows queue ahead of the database and end-to-end latency climbs for as long as the run lasts, which makes the measured percentiles a function of `RUN_DURATION` rather than of the runtime under test. The `Batching` group keeps one `BATCH_ENABLED=false` run as the reference point showing that.
 
-Since there is now a single anchor, six files are identical to it (`load_p20`, `pool_20`, `payload_0`, `batchsize_050`, `batchto_0200`, `batching_on`). That redundancy is deliberate: at `REPS=3` a sweep measures the anchor 18 times, and the spread across those runs is the noise floor that differences elsewhere in the report should be judged against.
+Since there is now a single anchor, seven files are identical to it (`load_p20`, `pool_20`, `payload_0`, `batchsize_050`, `batchto_0200`, `batching_on`, `reads_0000`). That redundancy is deliberate: at `REPS=3` a sweep measures the anchor 21 times, and the spread across those runs is the noise floor that differences elsewhere in the report should be judged against.
 
 | Group | File pattern | Factor swept | Values (**bold** = anchor) |
 |-------|--------------|--------------|----------------------------|
@@ -124,6 +127,7 @@ Since there is now a single anchor, six files are identical to it (`load_p20`, `
 | Batch size | `timescale_batchsize_{NNN}.env` | `BATCH_SIZE` | 20, **50**, 100, 200, 500 |
 | Batch timeout | `timescale_batchto_{NNNN}.env` | `BATCH_TIMEOUT_MS` | 50, **200**, 500, 1000 |
 | Batching | `timescale_batching_{off,on}.env` | `BATCH_ENABLED` | off, **on** |
+| DB reads | `timescale_reads_{NNNN}.env` | `READS_PER_SEC` | **0**, 20, 50, 80, 100 |
 
 The two batch factors are not independent: a buffer flushes on whichever trigger fires first, so the
 **effective batch size** is roughly `min(BATCH_SIZE, per-writer rate × BATCH_TIMEOUT_MS)`. Rows are routed
@@ -135,6 +139,43 @@ timeout is the shorter of the two (e.g. `batchto_0050` against the anchor's ≈5
 cycle rather than racing the buffer, because it is armed on the first row of each new buffer instead of
 free-running — so the flush period is fixed and the resulting tail is *tighter* than a size-triggered one,
 not noisier.
+
+**The read group is deliberately artificial load.** `READ_POOL_SIZE` reader actors inside the subscriber
+each run one query at a time — `SELECT avg(Value), count(*) FROM Data WHERE Timestamp > now() - interval
+'5 seconds'`, fixed text and byte-identical across arms — so the point is concurrent query pressure on the
+database and on the runtime's schedulers, not a realistic query mix. Reads live in the subscriber rather
+than a separate container precisely because a separate container would contend for the database but not for
+either runtime's schedulers or dispatchers, which is the only part that can distinguish the two arms.
+
+A reader arms its next read only once the previous one has *returned*, so at most one query per reader is
+ever in flight and `READS_PER_SEC` can never build a backlog. The delay is computed against a **fixed
+deadline** that advances by exactly one period per cycle, not as period-minus-query-time: the latter leaves
+each cycle carrying whatever the runtime spends outside the measured read, which was a constant ≈20ms per
+cycle in the Scala arm against ≈1ms in Erlang — enough that the two arms ran measurably different read loads
+at the same setting. Deadline pacing absorbs a constant lateness entirely.
+
+The target is still a ceiling rather than a guarantee, so **report the achieved rate
+(`subscriber_reads_total`), never the configured one.** At the anchor one query costs ≈26–32ms, putting the
+saturation ceiling at 4 readers ÷ query cost ≈ 114–124 reads/s. Measured across the ladder:
+
+| `READS_PER_SEC` | Erlang achieved | Scala achieved |
+|---|---|---|
+| 20 | 20.0 /s | 20.0 /s |
+| 50 | 50.3 /s | 50.1 /s |
+| 80 | 80.5 /s | 77.5 /s |
+| 100 | 100.6 /s | 89.0 /s |
+
+Up to 50 the two arms are indistinguishable. Beyond it Scala's higher per-query cost starts eating the
+period's slack — at 100 the period is 40ms while its p99 read exceeds 50ms, so a meaningful share of cycles
+overrun and it settles at 89/s while Erlang still makes 100.6/s. **The top of the ladder is therefore a
+deliberate saturation probe, not a like-for-like comparison**: at 100 the two arms are running different
+read loads, and the point measures where read capacity runs out rather than the response to a shared factor
+level. Compare the arms at 20 and 50, and read 80 and 100 as the shape of each arm's ceiling.
+
+Reads also change the connection budget: total PostgreSQL connections are `DB_POOL_SIZE + READ_POOL_SIZE`
+while reads are on and `DB_POOL_SIZE` when `READS_PER_SEC=0`, identically in both arms. `READ_POOL_SIZE` is
+documented but never swept — holding it fixed is what keeps the group's connection count constant and
+independent of `PUBLISHER_COUNT`, so the read curve is not confounded by a moving connection count.
 
 **Why the load sweep stops at 48 publishers.** Load generation is co-located with the system under
 test on the same host, and the publishers are the largest CPU consumer in the stack. Up to 32 publishers
@@ -162,6 +203,8 @@ The no-batch-vs-batch comparison is the `Batching` group: `timescale_batching_of
 | `BATCH_SIZE` | `100` | Flush when buffer reaches this many rows |
 | `BATCH_TIMEOUT_MS` | `1000` | Flush after this many ms even if buffer is not full |
 | `PAYLOAD_PADDING_BYTES` | `0` | Extra filler bytes added as a trailing `"padding"` field on top of the shared base payload (identical in both arms), for payload-size benchmarks |
+| `READS_PER_SEC` | `0` | Aggregate target read rate across all readers. `0` starts no readers at all — no actors, no connections, no timers. Achieved rate falls below this once the target exceeds what the readers can sustain |
+| `READ_POOL_SIZE` | `4` | Reader actors, each holding one PostgreSQL connection, so total connections are `DB_POOL_SIZE + READ_POOL_SIZE` while reads are on. Documented but not swept |
 | `RUN_DURATION` | _(unset)_ | Fixed measurement window in seconds. Set it (or use `bench.sh all`, which defaults it to `90`) for an unattended run; leave unset for an interactive `Ctrl+C` run |
 | `WARMUP_SECONDS` | `30` | Startup transient excluded from every reported figure. Must be at least the 15s rate window, or the first samples kept are still contaminated by the ramp |
 | `STARTUP_TIMEOUT` | `180` | Seconds a rep may take to bring up a scrapeable metrics endpoint before it is skipped |

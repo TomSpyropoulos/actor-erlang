@@ -25,6 +25,7 @@ from pathlib import Path
 SERIES_METRICS = [
     ("msgs_s", "messages_per_second / value"),
     ("committed_s", "committed_per_second / value"),
+    ("reads_s", "reads_per_second / value"),
 ]
 SUM_METRICS = [
     ("cpu_cores", "container_cpu_usage / "),
@@ -37,6 +38,7 @@ LATENCY_STAGES = [
     ("req", "publisher_subscriber_latency_ms"),
     ("e2e", "publisher_db_e2e_latency_ms"),
     ("db", "db_write_latency_ms"),
+    ("read", "db_read_latency_ms"),
 ]
 QUANTILES = [("p50", 0.5), ("p95", 0.95), ("p99", 0.99), ("p999", 0.999)]
 
@@ -50,6 +52,7 @@ METRIC_NAMES = SCALAR_NAMES + LATENCY_NAMES
 GROUP_TITLES = {
     "load": "Load", "pool": "Pool", "payload": "Payload",
     "batchsize": "Batch size", "batchto": "Batch timeout", "batching": "Batching",
+    "reads": "DB reads",
 }
 
 
@@ -125,8 +128,11 @@ def extract_histograms(run):
     stages = {}
     for prefix, panel in LATENCY_STAGES:
         first, last = buckets_at(steady[0], panel), buckets_at(steady[-1], panel)
+        # A stage with no buckets is skipped, not treated as a failed run: the read stage is absent
+        # from every run collected before the read group existed, and failing the run over it would
+        # silently drop those runs' write-path histograms too and re-rate the whole archived dataset.
         if not first or not last:
-            return None
+            continue
         stages[prefix] = {
             "steady": bucket_delta(first, last),
             "sum": (scalar_at(steady[-1], f"{panel}_sum") or 0.0)
@@ -138,7 +144,8 @@ def extract_histograms(run):
             # transient including what happened before monitor.py's first sample.
             "warmup": buckets_at(steady[0], panel),
         }
-    return stages
+    # No stage at all means a pre-migration run with no bucket panels; the legacy estimator reads it.
+    return stages or None
 
 
 # Seconds until throughput first settles within 5% of its steady mean and stays there. Reported as
@@ -267,17 +274,25 @@ def summarize(runs):
                                  "kind": "legacy"}
             continue
 
-        pooled = pool_buckets([h[prefix]["steady"] for h in pooled_reps])
+        # Only the reps that carry this stage. A stage every rep lacks leaves empty cells rather
+        # than a zero, which would read as a measured latency of zero rather than as "not measured".
+        stage_reps = [h for h in pooled_reps if prefix in h]
+        if not stage_reps:
+            for name in [f"{prefix}_{q}" for q, _ in QUANTILES] + [f"{prefix}_mean"]:
+                summary[name] = {"value": None, "spread": None, "kind": "pooled"}
+            continue
+
+        pooled = pool_buckets([h[prefix]["steady"] for h in stage_reps])
         for label, level in QUANTILES:
-            rep_values = [histogram_quantile(level, h[prefix]["steady"]) for h in pooled_reps]
+            rep_values = [histogram_quantile(level, h[prefix]["steady"]) for h in stage_reps]
             rep_values = [v for v in rep_values if v is not None]
             summary[f"{prefix}_{label}"] = {
                 "value": histogram_quantile(level, pooled),
                 "spread": (min(rep_values), max(rep_values)) if rep_values else None,
                 "kind": "pooled",
             }
-        total_sum = sum(h[prefix]["sum"] for h in pooled_reps)
-        total_count = sum(h[prefix]["count"] for h in pooled_reps)
+        total_sum = sum(h[prefix]["sum"] for h in stage_reps)
+        total_count = sum(h[prefix]["count"] for h in stage_reps)
         summary[f"{prefix}_mean"] = {
             "value": total_sum / total_count if total_count > 0 else None,
             "spread": None, "kind": "pooled",
@@ -307,7 +322,7 @@ def summarize_startup(runs):
     warmup_p99 = []
     for run in runs:
         stages = extract_histograms(run)
-        if stages:
+        if stages and "e2e" in stages:
             value = histogram_quantile(0.99, stages["e2e"]["warmup"])
             if value is not None:
                 warmup_p99.append(value)

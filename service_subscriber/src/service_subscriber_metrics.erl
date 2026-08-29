@@ -3,7 +3,7 @@
 
 %% API
 -export([start_link/0]).
--export([inc_requests/0, inc_committed/1, observe_latency/1, observe_e2e_latency/1, observe_db_write_latency/1, set_sensor_status/2]).
+-export([inc_requests/0, inc_committed/1, observe_latency/1, observe_e2e_latency/1, observe_db_write_latency/1, inc_reads/0, observe_read_latency/1, set_sensor_status/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -52,6 +52,16 @@ observe_e2e_latency(LatencyNative) ->
 observe_db_write_latency(LatencyNative) ->
     prometheus_histogram:observe(subscriber_db_write_latency_milliseconds, LatencyNative).
 
+%% Increments the completed-read counter by one. Reads that failed are deliberately not counted,
+%% so the read rate does not hold steady while queries are erroring out.
+inc_reads() ->
+    prometheus_counter:inc(subscriber_reads_total).
+
+%% Records how long one read took, in native units for the same reason as observe_latency/1: an
+%% integer observation is a single ets:update_counter, a float rebuilds a 40-atom match spec.
+observe_read_latency(LatencyNative) ->
+    prometheus_histogram:observe(subscriber_read_latency_milliseconds, LatencyNative).
+
 %% Updates the per-device liveness gauge to 1 (ALIVE) or 0 (MISSING) on every heartbeat.
 set_sensor_status(DeviceName, <<"ALIVE">>) ->
     prometheus_gauge:set(subscriber_sensor_up, [DeviceName], 1);
@@ -93,6 +103,20 @@ init([]) ->
     prometheus_histogram:declare([
         {name, subscriber_db_write_latency_milliseconds},
         {help, "Latency from subscriber receive to DB write ack, in milliseconds."},
+        {labels, []},
+        {buckets, ?LATENCY_BUCKETS}
+    ]),
+
+    prometheus_counter:declare([
+        {name, subscriber_reads_total},
+        {help, "Total read queries completed against the database."}
+    ]),
+
+    %% Same bucket bounds as the write-path histograms: the read stage is reported through the same
+    %% pooled-quantile machinery, so it has to share the bounds to be sliceable the same way.
+    prometheus_histogram:declare([
+        {name, subscriber_read_latency_milliseconds},
+        {help, "Latency of read queries in milliseconds."},
         {labels, []},
         {buckets, ?LATENCY_BUCKETS}
     ]),
