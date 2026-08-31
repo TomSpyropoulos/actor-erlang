@@ -50,9 +50,6 @@ docker compose up -d --build --scale publisher=3
 
 ## 🔬 Benchmarking
 
-> Measured results for both arms live in [`../RESULTS.md`](../RESULTS.md). This README covers how to
-> run and interpret a benchmark, not what it found.
-
 The subscriber's DB write path is decoupled from any specific database through a pluggable backend (`db_backend` behaviour). The active backend is selected at startup via the `DB_BACKEND` environment variable, with no recompilation required.
 
 ### How `bench.sh` works
@@ -134,10 +131,6 @@ Seven files are configuration-identical to the anchor (`load_p20`, `pool_20`, `p
 | Batching | `timescale_batching_{off,on}.env` | `BATCH_ENABLED` | off, **on** |
 | DB reads | `timescale_reads_{NNNN}.env` | `READS_PER_SEC` | **0**, 20, 50, 80, 100 |
 
-Interpreting a ladder — which comparisons along it are valid, and where its ends stop being
-like-for-like — is a result rather than a property of the harness; see
-[`../RESULTS.md`](../RESULTS.md).
-
 The two batch factors are not independent: a buffer flushes on whichever trigger fires first, so the
 **effective batch size** is roughly `min(BATCH_SIZE, per-writer rate × BATCH_TIMEOUT_MS)`. Rows are routed
 round-robin across `DB_POOL_SIZE` writers, and at the anchor a buffer fills well before the timeout expires,
@@ -146,7 +139,7 @@ low-rate periods. Sweeping the timeout below the fill time therefore does not me
 silently shrink the effective batch. Where the timeout is the shorter of the two (`batchto_0050` at the
 anchor) the timer wins every cycle rather than racing the buffer, because it is armed on the first row of
 each new buffer instead of free-running — so the flush period is fixed and the resulting tail is *tighter*
-than a size-triggered one, not noisier. The measured fill time is in [`../RESULTS.md`](../RESULTS.md).
+than a size-triggered one, not noisier.
 
 **The read group is deliberately artificial load.** `READ_POOL_SIZE` reader actors inside the subscriber
 each run one query at a time — `SELECT avg(Value), count(*) FROM Data WHERE Timestamp > now() - interval
