@@ -50,18 +50,23 @@ docker compose up -d --build --scale publisher=3
 
 ## 🔬 Benchmarking
 
+> Measured results for both arms live in [`../RESULTS.md`](../RESULTS.md). This README covers how to
+> run and interpret a benchmark, not what it found.
+
 The subscriber's DB write path is decoupled from any specific database through a pluggable backend (`db_backend` behaviour). The active backend is selected at startup via the `DB_BACKEND` environment variable, with no recompilation required.
 
 ### How `bench.sh` works
 
 `bench.sh` takes a scenario file, sources it as environment variables, starts the full Docker Compose stack with the configured number of publisher instances, and waits until the stack is actually ingesting — first for the subscriber's Prometheus endpoint to answer, then for `subscriber_requests_total` to start advancing. The second check matters because the metrics server binds before the subscriber has necessarily reached the broker or the database, so a subscriber that died during startup still serves a scrapeable `/metrics` with every counter at zero. A rep that does not begin ingesting within `INGEST_TIMEOUT` seconds (default `60`) is **skipped**: its container logs are dumped, no JSON is written, and the sweep moves on, so a dead run can never be averaged into a report cell. `bench.sh all` reports the number of skipped reps in its closing summary. It then sets up a Python virtual environment under `benchmarking/.venv` (installing `benchmarking/requirements.txt` automatically on first run — no manual setup needed) and hands off to `benchmarking/monitor.py`.
 
-`monitor.py` queries Prometheus directly for the same panels shown on the "Container Monitoring" Grafana dashboard (ingest rate, committed-rows rate, the three latency histograms, sensor liveness, container CPU/memory) every `METRICS_INTERVAL` seconds (default: 10) and renders them as a live-updating view: a throughput/resource table plus a latency matrix (stage × quantile, with an exact mean beside them). It also collects the raw cumulative histogram buckets, which have no dashboard panel and exist purely so a run can be re-sliced offline. Press `Ctrl+C` to stop: it prints an avg/max summary and saves every raw, timestamped sample to a JSON file under `benchmarking/output/`.
+`monitor.py` queries Prometheus directly for the same panels shown on the "Container Monitoring" Grafana dashboard (ingest rate, committed-rows rate, the four latency histograms, sensor liveness, container CPU/memory) every `METRICS_INTERVAL` seconds (default: 10) and renders them as a live-updating view: a throughput/resource table plus a latency matrix (stage × quantile, with an exact mean beside them). It also collects the raw cumulative histogram buckets, which have no dashboard panel and exist purely so a run can be re-sliced offline. Press `Ctrl+C` to stop: it prints an avg/max summary and saves every raw, timestamped sample to a JSON file under `benchmarking/output/`.
 
-Aggregates cover **steady state only** — the first `WARMUP_SECONDS` (default `30`) are excluded, since throughput ramps from ~11k to 20k msg/s over the first ten seconds while publishers connect against a cold DB, and averaging that in understates throughput and inflates every latency figure. `RUN_DURATION` defaults to `90` in a sweep so a full minute of steady state remains after the trim and the 15s rate window. Every sample is still stored whole, so the trim is a reporting parameter: a run can be re-sliced at a different boundary without re-collecting it. `bench.sh` then runs a clean `docker compose down -v`.
+Aggregates cover **steady state only** — the first `WARMUP_SECONDS` (default `30`) are excluded, since throughput ramps toward steady state while publishers connect against a cold DB, and averaging that in understates throughput and inflates every latency figure. `RUN_DURATION` defaults to `90` in a sweep so a full minute of steady state remains after the trim and the 15s rate window. Every sample is still stored whole, so the trim is a reporting parameter: a run can be re-sliced at a different boundary without re-collecting it. `bench.sh` then runs a clean `docker compose down -v`.
+
+The live view, with illustrative values — a shape, not a measurement:
 
 ```
-=== Benchmark: timescale_batch.env ===
+=== Benchmark: <scenario>.env ===
   Publishers  : 5  (~5000 msg/s)
   Batch       : true  (size=100, timeout=1000ms)
   DB pool     : 5 workers
@@ -86,7 +91,7 @@ Aggregates cover **steady state only** — the first `WARMUP_SECONDS` (default `
 
 **Post-run report.** After a full `bench.sh all` sweep, `benchmarking/report.py` aggregates every per-rep JSON into [`benchmarking/output/report.csv`](benchmarking/output/report.csv) (one row per scenario) and [`benchmarking/output/report.md`](benchmarking/output/report.md). The Markdown report has three parts: one **headline** table per OFAT group, a **startup** table, and a **provenance** block recording the trim, run duration, bucket-list fingerprint and rep counts needed to reproduce or re-slice the figures.
 
-Headline tables report `msgs_s` (ingested) alongside `committed_s` (committed to the DB), and p50/p95/p99/p999 plus an exact mean for each of the three latencies — all over steady state only. Throughput and resource cells are `mean ± stdev` across reps. Latency cells are a **pooled quantile**: the reps' steady-state histogram buckets are summed and one quantile taken over the total, with the per-rep min–max shown where the reps disagreed by more than 5%. Averaging per-rep quantiles instead can report a value no rep ever observed — three reps whose p99s are 10 ms, 10 ms and 300 ms average to 107 ms, while the p99 of the same 3000 observations is 300 ms. The per-rep spread is what shows when the reps were not interchangeable.
+Headline tables report `msgs_s` (ingested) alongside `committed_s` (committed to the DB), and p50/p95/p99/p999 plus an exact mean for each of the four latencies — all over steady state only. Throughput and resource cells are `mean ± stdev` across reps. Latency cells are a **pooled quantile**: the reps' steady-state histogram buckets are summed and one quantile taken over the total, with the per-rep min–max shown where the reps disagreed by more than 5%. Averaging per-rep quantiles instead can report a value no rep ever observed — three reps whose p99s are 10 ms, 10 ms and 300 ms average to 107 ms, while the p99 of the same 3000 observations is 300 ms. The per-rep spread is what shows when the reps were not interchangeable.
 
 The startup table carries one row per scenario: how long the stack took to serve metrics and then to ingest its first message, the measured time-to-steady-state, and the warm-up p99 — turning the startup transient from a contaminant into the JVM-ramp-vs-BEAM-flat-start comparison it should be. Time-to-steady-state is reported, never used to trim: a per-rep trim would give the two arms windows of different length and phase. `bench.sh all` first clears `benchmarking/output/*.json` so the report covers only that sweep; run a single scenario and invoke `report.py` yourself if you'd rather accumulate runs across sweeps. Run it standalone at any time against an existing `output/` directory:
 
@@ -104,10 +109,10 @@ chmod +x bench.sh
 # One scenario, interactively (Ctrl+C to stop):
 ./bench.sh benchmarking/scenarios/timescale_load_p20.env
 
-# One scenario, fixed 60s unattended run:
+# One scenario, fixed 90s unattended run:
 RUN_DURATION=90 ./bench.sh benchmarking/scenarios/timescale_load_p20.env
 
-# The full OFAT sweep (all 25 scenarios, 90s each, unattended):
+# The full OFAT sweep (all 30 scenarios, 90s each, unattended):
 ./bench.sh all
 ```
 
@@ -117,7 +122,7 @@ All 30 scenarios follow a **one-factor-at-a-time (OFAT)** design: every file cha
 
 The anchor batches because the single-row write path cannot sustain 20k msg/s: rows queue ahead of the database and end-to-end latency climbs for as long as the run lasts, which makes the measured percentiles a function of `RUN_DURATION` rather than of the runtime under test. The `Batching` group keeps one `BATCH_ENABLED=false` run as the reference point showing that.
 
-Since there is now a single anchor, seven files are identical to it (`load_p20`, `pool_20`, `payload_0`, `batchsize_050`, `batchto_0200`, `batching_on`, `reads_0000`). That redundancy is deliberate: at `REPS=3` a sweep measures the anchor 21 times, and the spread across those runs is the noise floor that differences elsewhere in the report should be judged against.
+Seven files are configuration-identical to the anchor (`load_p20`, `pool_20`, `payload_0`, `batchsize_050`, `batchto_0200`, `batching_on`, `reads_0000`). That redundancy is deliberate: at `REPS=3` a sweep measures the anchor 21 times, and the spread across those runs is the noise floor that differences elsewhere in the report should be judged against.
 
 | Group | File pattern | Factor swept | Values (**bold** = anchor) |
 |-------|--------------|--------------|----------------------------|
@@ -129,16 +134,19 @@ Since there is now a single anchor, seven files are identical to it (`load_p20`,
 | Batching | `timescale_batching_{off,on}.env` | `BATCH_ENABLED` | off, **on** |
 | DB reads | `timescale_reads_{NNNN}.env` | `READS_PER_SEC` | **0**, 20, 50, 80, 100 |
 
+Interpreting a ladder — which comparisons along it are valid, and where its ends stop being
+like-for-like — is a result rather than a property of the harness; see
+[`../RESULTS.md`](../RESULTS.md).
+
 The two batch factors are not independent: a buffer flushes on whichever trigger fires first, so the
 **effective batch size** is roughly `min(BATCH_SIZE, per-writer rate × BATCH_TIMEOUT_MS)`. Rows are routed
-round-robin across `DB_POOL_SIZE` writers, so at the anchor each writer sees ≈ 19k/20 ≈ 950 rows/s and a
-50-row buffer fills in ≈ 53ms — well under the 200ms timeout, which makes `BATCH_SIZE` the binding trigger
-under load and leaves the timeout as the latency guard for low-rate periods. Sweeping the timeout below the
-fill time therefore does not measure the timeout so much as silently shrink the effective batch. Where the
-timeout is the shorter of the two (e.g. `batchto_0050` against the anchor's ≈53ms fill) the timer wins every
-cycle rather than racing the buffer, because it is armed on the first row of each new buffer instead of
-free-running — so the flush period is fixed and the resulting tail is *tighter* than a size-triggered one,
-not noisier.
+round-robin across `DB_POOL_SIZE` writers, and at the anchor a buffer fills well before the timeout expires,
+which makes `BATCH_SIZE` the binding trigger under load and leaves the timeout as the latency guard for
+low-rate periods. Sweeping the timeout below the fill time therefore does not measure the timeout so much as
+silently shrink the effective batch. Where the timeout is the shorter of the two (`batchto_0050` at the
+anchor) the timer wins every cycle rather than racing the buffer, because it is armed on the first row of
+each new buffer instead of free-running — so the flush period is fixed and the resulting tail is *tighter*
+than a size-triggered one, not noisier. The measured fill time is in [`../RESULTS.md`](../RESULTS.md).
 
 **The read group is deliberately artificial load.** `READ_POOL_SIZE` reader actors inside the subscriber
 each run one query at a time — `SELECT avg(Value), count(*) FROM Data WHERE Timestamp > now() - interval
@@ -150,44 +158,18 @@ either runtime's schedulers or dispatchers, which is the only part that can dist
 A reader arms its next read only once the previous one has *returned*, so at most one query per reader is
 ever in flight and `READS_PER_SEC` can never build a backlog. The delay is computed against a **fixed
 deadline** that advances by exactly one period per cycle, not as period-minus-query-time: the latter leaves
-each cycle carrying whatever the runtime spends outside the measured read, which was a constant ≈20ms per
-cycle in the Scala arm against ≈1ms in Erlang — enough that the two arms ran measurably different read loads
-at the same setting. Deadline pacing absorbs a constant lateness entirely.
+each cycle carrying whatever the runtime spends outside the measured read, and that overhead differed enough
+between the two arms that they ran measurably different read loads at the same setting. Deadline pacing
+absorbs a constant lateness entirely.
 
 The target is still a ceiling rather than a guarantee, so **report the achieved rate
-(`subscriber_reads_total`), never the configured one.** At the anchor one query costs ≈26–32ms, putting the
-saturation ceiling at 4 readers ÷ query cost ≈ 114–124 reads/s. Measured across the ladder:
-
-| `READS_PER_SEC` | Erlang achieved | Scala achieved |
-|---|---|---|
-| 20 | 20.0 /s | 20.0 /s |
-| 50 | 50.3 /s | 50.1 /s |
-| 80 | 80.5 /s | 77.5 /s |
-| 100 | 100.6 /s | 89.0 /s |
-
-Up to 50 the two arms are indistinguishable. Beyond it Scala's higher per-query cost starts eating the
-period's slack — at 100 the period is 40ms while its p99 read exceeds 50ms, so a meaningful share of cycles
-overrun and it settles at 89/s while Erlang still makes 100.6/s. **The top of the ladder is therefore a
-deliberate saturation probe, not a like-for-like comparison**: at 100 the two arms are running different
-read loads, and the point measures where read capacity runs out rather than the response to a shared factor
-level. Compare the arms at 20 and 50, and read 80 and 100 as the shape of each arm's ceiling.
+(`subscriber_reads_total`), never the configured one** — an unreachable target shows up as an achieved rate
+below it rather than as an error, at any setting.
 
 Reads also change the connection budget: total PostgreSQL connections are `DB_POOL_SIZE + READ_POOL_SIZE`
 while reads are on and `DB_POOL_SIZE` when `READS_PER_SEC=0`, identically in both arms. `READ_POOL_SIZE` is
 documented but never swept — holding it fixed is what keeps the group's connection count constant and
 independent of `PUBLISHER_COUNT`, so the read curve is not confounded by a moving connection count.
-
-**Why the load sweep stops at 48 publishers.** Load generation is co-located with the system under
-test on the same host, and the publishers are the largest CPU consumer in the stack. Up to 32 publishers
-both runtimes deliver ≥97% of the nominal 1000 msg/s per publisher; at 48 Erlang still delivers 98% while
-Scala drops to 77%, because a Scala publisher costs roughly 34% more CPU per message. A 64-publisher
-scenario used to exist and was removed: at that scale the observability stack fails before any valid
-measurement is taken — the Erlang subscriber's `/metrics` endpoint takes 9–16s to answer (against
-Prometheus's 2s budget, so its target reports `down` for the whole run) and Scala's cAdvisor target times
-out scraping 71 containers. The pipeline itself stays healthy there — the Erlang stack was measured
-committing 28k rows/s while Prometheus reported it down — so the failure is one of measurement, not of the
-runtimes. Treat 32 publishers as the ceiling for cross-runtime comparison and 48 as an
-Erlang-only headroom point.
 
 The no-batch-vs-batch comparison is the `Batching` group: `timescale_batching_off.env` versus
 `timescale_batching_on.env` (the latter identical to the anchor).

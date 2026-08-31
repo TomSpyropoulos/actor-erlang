@@ -32,7 +32,7 @@ SUM_METRICS = [
     ("mem_mb", "container_memory_usage_mb / "),
 ]
 
-# The three latency stages, keyed by the monitor.py panel base name that carries their raw buckets.
+# The four latency stages, keyed by the monitor.py panel base name that carries their raw buckets.
 # Column prefixes match the pre-migration report so a reader's muscle memory still works.
 LATENCY_STAGES = [
     ("req", "publisher_subscriber_latency_ms"),
