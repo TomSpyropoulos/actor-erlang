@@ -41,11 +41,16 @@
 %% Opens a PostgreSQL connection and pre-parses the read statement this reader will reuse.
 init(Index) ->
     Host   = os:getenv("DB_HOST",     "timescaledb"),
+    Port   = list_to_integer(os:getenv("DB_PORT", "5432")),
     User   = os:getenv("DB_USER",     "postgres"),
     Pass   = os:getenv("DB_PASSWORD", "postgres"),
     DBName = os:getenv("DB_NAME",     "epu"),
+    %% Port is passed explicitly rather than left to epgsql's 5432 default so this arm reads the
+    %% same five connection keys as DbConfig in the Scala arm, which is what lets one
+    %% docker-compose.<backend>.yaml configure both repos identically.
     {ok, DB} = epgsql:connect(Host, User, Pass, #{
         database => DBName,
+        port     => Port,
         timeout  => 5000
     }),
     ?LOG_INFO("TimescaleDB read backend reader ~p connected", [Index]),

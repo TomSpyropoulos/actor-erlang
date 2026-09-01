@@ -206,8 +206,10 @@ def extract_legacy_latencies(aggregates):
     return latencies
 
 
-# Split a scenario file name ("timescale_load_p20.env") into its OFAT group and factor value
-# ("load", "p20") for report sectioning; names that don't fit collapse to (stem, "-").
+# Split a scenario file name ("load_p20.env") into its OFAT group and factor value ("load", "p20")
+# for report sectioning; names that don't fit collapse to (stem, "-"). The `timescale_` strip is a
+# fallback for runs archived before the backend left the file name -- current scenarios carry no
+# backend prefix, since one set of files is shared by every DB_BACKEND.
 def parse_group_value(scenario):
     stem = Path(scenario).stem
     stem = stem[len("timescale_"):] if stem.startswith("timescale_") else stem

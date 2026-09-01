@@ -42,11 +42,16 @@
 %% run does not pay an extra parse per worker at startup.
 init(Index, #{batch_enabled := BatchEnabled}) ->
     Host   = os:getenv("DB_HOST",     "timescaledb"),
+    Port   = list_to_integer(os:getenv("DB_PORT", "5432")),
     User   = os:getenv("DB_USER",     "postgres"),
     Pass   = os:getenv("DB_PASSWORD", "postgres"),
     DBName = os:getenv("DB_NAME",     "epu"),
+    %% Port is passed explicitly rather than left to epgsql's 5432 default so this arm reads the
+    %% same five connection keys as DbConfig in the Scala arm, which is what lets one
+    %% docker-compose.<backend>.yaml configure both repos identically.
     {ok, DB} = epgsql:connect(Host, User, Pass, #{
         database => DBName,
+        port     => Port,
         timeout  => 5000
     }),
     ?LOG_INFO("TimescaleDB backend worker ~p connected", [Index]),

@@ -1,0 +1,56 @@
+# TimescaleDB fragment: everything specific to DB_BACKEND=timescaledb. Loaded alongside
+# docker-compose.yaml -- by bench.sh via an explicit second -f, and by the root .env's
+# COMPOSE_FILE for hand-run `docker compose` commands. A second database is a sibling
+# docker-compose.<name>.yaml rather than an edit to the base compose, so only the selected
+# database's container ever starts and an idle one can never be charged to cpu_cores/mem_mb.
+services:
+  # TimescaleDB: a pgsql extension for speeding up timeseries data
+  timescaledb:
+    image: timescale/timescaledb-ha:pg18.1-ts2.25.1
+    container_name: timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: epu
+    volumes:
+      - timescaledb-storage:/var/lib/postgresql/data
+      - ./timescaledb/init/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      # -h 127.0.0.1 forces a TCP probe. Without it pg_isready checks the Unix socket, which the
+      # entrypoint's temporary init-time server (running init.sql) also answers -- so the container
+      # was marked healthy during initdb, dependents were released, and Postgres then shut down and
+      # restarted to bind TCP, refusing connections for ~3s. Every rep re-runs initdb because
+      # bench.sh tears down with `down -v`, so that window was reopened on every single run.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # The publisher never touches the database. It waits anyway so publishers do not start ahead of
+  # the rest of the stack -- that ordering is what bench.sh's startup gates measure, so it is kept
+  # exactly as it was before the split rather than dropped as dead weight.
+  publisher:
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+  # Connection config for this backend. Both arms read the same five keys -- see
+  # db_backend_timescaledb.erl in actor-erlang and DbConfig in Database.scala in actor-scala --
+  # so this file is byte-identical in the two repos.
+  subscriber:
+    environment:
+      DB_HOST:     ${DB_HOST:-timescaledb}
+      DB_PORT:     ${DB_PORT:-5432}
+      DB_NAME:     ${DB_NAME:-epu}
+      DB_USER:     ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+volumes:
+  timescaledb-storage: {}

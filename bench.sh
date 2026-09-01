@@ -4,7 +4,25 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
 BENCH_DIR="$REPO/benchmarking"
 VENV_DIR="$BENCH_DIR/.venv"
-COMPOSE=(docker compose -f "$REPO/docker-compose.yaml")
+
+# Which database this whole invocation runs against. A launch-time axis, not a per-scenario factor:
+# the scenario files carry only the factors they vary, so the same 30 describe every backend.
+DB_BACKEND="${DB_BACKEND:-timescaledb}"
+export DB_BACKEND
+DB_COMPOSE="$REPO/docker-compose.$DB_BACKEND.yaml"
+if [[ ! -f "$DB_COMPOSE" ]]; then
+    echo "unknown DB_BACKEND '$DB_BACKEND': no such file $DB_COMPOSE" >&2
+    echo "available backends: $(ls "$REPO"/docker-compose.*.yaml 2>/dev/null \
+        | sed 's#.*/docker-compose\.##; s#\.yaml$##' | tr '\n' ' ')" >&2
+    exit 1
+fi
+# The database fragment is passed explicitly rather than left to the root .env's COMPOSE_FILE: the
+# `up` below passes --env-file, which REPLACES that file instead of adding to it, so COMPOSE_FILE
+# would be lost and the stack would come up with no database and no error.
+COMPOSE=(docker compose -f "$REPO/docker-compose.yaml" -f "$DB_COMPOSE")
+
+# Per-backend, so a second database's sweep cannot overwrite the first's runs or its report.
+OUTPUT_DIR="$BENCH_DIR/output/$DB_BACKEND"
 
 # How long a rep may take to become measurable before it is abandoned. Startup covers image start
 # plus the database's initdb; ingestion covers broker connect and the first messages arriving.
@@ -66,7 +84,7 @@ run_one() (
     echo "  Publishers  : $pub  (~$((pub * 1000)) msg/s)"
     echo "  Batch       : ${BATCH_ENABLED:-false}  (size=${BATCH_SIZE:-100}, timeout=${BATCH_TIMEOUT_MS:-1000}ms)"
     echo "  DB pool     : ${DB_POOL_SIZE:-20} workers"
-    echo "  Backend     : ${DB_BACKEND:-timescaledb}"
+    echo "  Backend     : $DB_BACKEND"
     [[ -n "${RUN_DURATION:-}" ]] && echo "  Duration    : ${RUN_DURATION}s (interval ${interval}s, warm-up ${WARMUP_SECONDS}s)"
     echo ""
 
@@ -115,7 +133,7 @@ run_one() (
         --prometheus-url "http://localhost:9090" \
         --interval "$interval" \
         --scenario-name "$(basename "$scenario")" \
-        --output-dir "$BENCH_DIR/output" \
+        --output-dir "$OUTPUT_DIR" \
         --rep "$rep" \
         --warmup "$WARMUP_SECONDS" \
         --gate-startup-seconds "$waited" \
@@ -158,8 +176,8 @@ if [[ "$MODE" == all ]]; then
 
     # Start each sweep from a clean slate so the report reflects only this run's data, not stale
     # JSON left by earlier sweeps. -f keeps a non-matching glob from erroring when output/ is empty.
-    echo "Clearing previous run JSON from $BENCH_DIR/output/..."
-    rm -f "$BENCH_DIR"/output/*.json
+    echo "Clearing previous run JSON from $OUTPUT_DIR/..."
+    rm -f "$OUTPUT_DIR"/*.json
 
     echo "Building images once before the sweep..."
     "${COMPOSE[@]}" build > /dev/null 2>&1
@@ -172,12 +190,12 @@ if [[ "$MODE" == all ]]; then
         run_reps "$scenario" nobuild
     done
     echo ""
-    echo "Sweep complete: ${#scenarios[@]} scenarios x ${REPS} reps, ${SKIPPED_REPS} reps skipped. Results in $BENCH_DIR/output/"
+    echo "Sweep complete: ${#scenarios[@]} scenarios x ${REPS} reps, ${SKIPPED_REPS} reps skipped. Results in $OUTPUT_DIR/"
 
     # Aggregate every per-rep JSON into a CSV + Markdown report (stdlib only, so the venv
     # built during the sweep already has what it needs).
     echo "Generating report..."
-    "$VENV_DIR/bin/python" "$BENCH_DIR/report.py" --output-dir "$BENCH_DIR/output" || true
+    "$VENV_DIR/bin/python" "$BENCH_DIR/report.py" --output-dir "$OUTPUT_DIR" || true
 else
     # Single-scenario mode. Interactive (Ctrl+C) unless RUN_DURATION is set, in which
     # case it runs unattended for that many seconds. Rebuilds to pick up code changes.
