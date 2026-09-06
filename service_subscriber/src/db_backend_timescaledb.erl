@@ -1,24 +1,12 @@
-%% @doc TimescaleDB (PostgreSQL) backend implementing the db_backend behaviour.
+%% @doc TimescaleDB (PostgreSQL) backend implementing the db_backend behaviour. One instance per
+%% pool worker, statements parsed once at init/2. Buffering and the batch triggers belong to the
+%% dispatcher (service_subscriber_db); what lives here is how a write is executed and how its ack is
+%% correlated back to the rows it covered.
 %%
-%% One instance is held per pool worker. Prepared statements are parsed once
-%% at init/2 to avoid a parse round-trip on every write.
+%% Both write paths go out asynchronously via epgsqla. The ack arrives as a {Pid, Ref, Result}
+%% message that handle_result/2 claims by matching the worker's own db_pid.
 %%
-%% This module does not buffer and does not own the batch triggers: the
-%% dispatcher (service_subscriber_db) does, and calls insert/5 or insert_batch/2
-%% accordingly. All that lives here is how a write is executed against epgsql
-%% and how its ack is correlated back to the rows it covered.
-%%
-%% Both write paths are dispatched asynchronously via epgsqla. The DB ack
-%% arrives as a {Pid, Ref, Result} message which handle_result/2 claims by
-%% matching the worker's own db_pid. Latencies are computed internally and
-%% returned to the dispatcher as {match, [{E2E, Sub}], NewState} -- one pair for
-%% a single insert, one per row for a batch.
-%%
-%% Connection parameters are read from environment variables at startup:
-%%   DB_HOST        (default: timescaledb)
-%%   DB_USER        (default: postgres)
-%%   DB_PASSWORD    (default: postgres)
-%%   DB_NAME        (default: epu)
+%% Reads the five DB_* connection variables; their defaults live in docker-compose.timescaledb.yaml.
 -module(db_backend_timescaledb).
 -behaviour(db_backend).
 
@@ -46,9 +34,7 @@ init(Index, #{batch_enabled := BatchEnabled}) ->
     User   = os:getenv("DB_USER",     "postgres"),
     Pass   = os:getenv("DB_PASSWORD", "postgres"),
     DBName = os:getenv("DB_NAME",     "epu"),
-    %% Port is passed explicitly rather than left to epgsql's 5432 default so this arm reads the
-    %% same five connection keys as DbConfig in the Scala arm, which is what lets one
-    %% docker-compose.<backend>.yaml configure both repos identically.
+    %% Port passed explicitly, not left to epgsql's default, so both arms read the same five keys.
     {ok, DB} = epgsql:connect(Host, User, Pass, #{
         database => DBName,
         port     => Port,
@@ -64,8 +50,7 @@ init(Index, #{batch_enabled := BatchEnabled}) ->
         "INSERT INTO sensor_status (DeviceName, Status) VALUES ($1, $2)",
         []),
 
-    %% Pre-parse the unnest batch statement once so insert_batch/2 can reuse it
-    %% for any batch size without a per-flush parse round-trip.
+    %% Parsed once here: the unnest form keeps the SQL text fixed at any batch size.
     BatchInsertStmt = case BatchEnabled of
         true ->
             {ok, S} = epgsql:parse(DB,
@@ -95,13 +80,11 @@ insert(#ts_state{db_pid = DB, insert_stmt = Stmt, pending = P} = State,
     {async, State#ts_state{pending = P#{Ref => {MsgTs, ProcStart}}}}.
 
 %% Sends a flushed buffer as a single unnest INSERT and registers the batch ref for latency tracking.
-%% Three array parameters keep the SQL text fixed at any batch size, which is what lets the statement
-%% be parsed once at init. Mirrors the Scala TimescaleBatchTarget -- keep the two in sync.
+%% Mirrors TimescaleBatchTarget.scala.
 insert_batch(#ts_state{db_pid = DB, batch_insert_stmt = Stmt, pending = P} = State, Rows) ->
     Names      = [N  || {N, _, _, _} <- Rows],
     Values     = [V  || {_, V, _, _} <- Rows],
-    %% The DB-shaped timestamp is derived here, inside the pass that already builds the arrays,
-    %% so nothing epgsql-specific has to travel down from the worker.
+    %% Derived here so nothing epgsql-specific travels down from the worker.
     Timestamps = [micros_to_datetime(MsgTs) || {_, _, MsgTs, _} <- Rows],
     #statement{types = Types} = Stmt,
     TypedParams = lists:zip(Types, [Names, Values, Timestamps]),
@@ -167,8 +150,8 @@ latencies_for({MsgTs, ProcStart}) ->
     FlushTime = os:system_time(microsecond),
     [{max(0, FlushTime - MsgTs), max(0, FlushTime - ProcStart)}].
 
-%% Converts epoch microseconds to the {{Y,Mo,D},{H,Mi,SecFloat}} tuple epgsql binds to timestamptz.
-%% Fractional seconds carry the microseconds, so the wire format's full precision reaches the column.
+%% Converts epoch microseconds to the tuple epgsql binds to timestamptz; fractional seconds carry
+%% the microseconds. See db_backend_mysql:micros_to_datetime/1, deliberately kept separate.
 micros_to_datetime(Us) ->
     Secs  = Us div 1000000,
     Micro = Us rem 1000000,

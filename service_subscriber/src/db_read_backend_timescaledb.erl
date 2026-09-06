@@ -1,18 +1,10 @@
-%% @doc TimescaleDB (PostgreSQL) backend implementing the db_read_backend behaviour.
+%% @doc TimescaleDB (PostgreSQL) backend implementing the db_read_backend behaviour. One instance per
+%% reader, statement parsed once at init/1.
 %%
-%% One instance is held per reader. The read statement is parsed once at init/1
-%% so a read costs no parse round-trip, matching how db_backend_timescaledb
-%% pre-parses its writes.
+%% Synchronous epgsql, not epgsqla as every write is: there is no ack to correlate, and read/1's
+%% contract is blocking.
 %%
-%% Executed synchronously via epgsql rather than epgsqla, unlike every write in
-%% this service: there is no ack to correlate here, and the reader needs the
-%% elapsed time of the call itself to pace the next one.
-%%
-%% Connection parameters are read from environment variables at startup:
-%%   DB_HOST        (default: timescaledb)
-%%   DB_USER        (default: postgres)
-%%   DB_PASSWORD    (default: postgres)
-%%   DB_NAME        (default: epu)
+%% Reads the five DB_* connection variables; their defaults live in docker-compose.timescaledb.yaml.
 -module(db_read_backend_timescaledb).
 -behaviour(db_read_backend).
 
@@ -29,13 +21,10 @@
     read_stmt :: #statement{}
 }).
 
-%% The query the whole read group is built on. Fixed text and no parameters: an aggregate over a
-%% bounded recent window, so the rows it scans stay roughly constant as the table grows and read
-%% latency does not drift upward with elapsed run time the way an unbounded scan would. No device
-%% filter, so the reader needs no knowledge of which topics exist. Byte-identical to the query in
-%% TimescaleReadTarget.scala -- if the two arms ever issue different SQL the group compares query
-%% plans instead of runtimes, so keep them in sync. The rule is per backend: db_read_backend_mysql
-%% and MySQLReadTarget.scala must match each other, not this pair.
+%% The read group's query; see the read-group section of audit.md for why the window is bounded and
+%% carries no device filter. Byte-identical to TimescaleReadTarget.scala, or the group compares query
+%% plans instead of runtimes. The rule is per backend: db_read_backend_mysql and MySQLReadTarget.scala
+%% must match each other, not this pair.
 -define(READ_SQL,
         "SELECT avg(Value), count(*) FROM Data WHERE Timestamp > now() - interval '5 seconds'").
 
@@ -46,9 +35,7 @@ init(Index) ->
     User   = os:getenv("DB_USER",     "postgres"),
     Pass   = os:getenv("DB_PASSWORD", "postgres"),
     DBName = os:getenv("DB_NAME",     "epu"),
-    %% Port is passed explicitly rather than left to epgsql's 5432 default so this arm reads the
-    %% same five connection keys as DbConfig in the Scala arm, which is what lets one
-    %% docker-compose.<backend>.yaml configure both repos identically.
+    %% Port passed explicitly, not left to epgsql's default, so both arms read the same five keys.
     {ok, DB} = epgsql:connect(Host, User, Pass, #{
         database => DBName,
         port     => Port,
@@ -62,8 +49,7 @@ init(Index) ->
     {ok, #tsr_state{db_pid = DB, read_stmt = ReadStmt}}.
 
 %% Runs the pre-parsed read to completion and discards the result set. A failed read is reported so
-%% the reader can log it and leave it uncounted, rather than inflating the read rate with queries
-%% that never returned an answer.
+%% the reader leaves it uncounted rather than inflating the read rate with queries that never answered.
 read(#tsr_state{db_pid = DB, read_stmt = Stmt} = State) ->
     case epgsql:prepared_query(DB, Stmt, []) of
         {error, Reason} -> {error, Reason, State};

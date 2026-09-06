@@ -1,22 +1,12 @@
-%% @doc Read-load generator -- one GenServer per reader (pool of READ_POOL_SIZE).
+%% @doc Read-load generator -- one GenServer per reader (pool of READ_POOL_SIZE). Each owns one
+%% db_read_backend instance, runs one read at a time and paces itself, so unlike the DB dispatcher
+%% there is no round-robin: nothing is routed here.
 %%
-%% Each reader owns one db_read_backend instance and its connection, runs one
-%% read at a time, and paces itself. Nothing is routed to a reader: unlike the DB
-%% dispatcher there is no round-robin, because readers drive themselves rather
-%% than serving traffic from the ingest path.
+%% Deliberately artificial load, swept as a benchmark factor; see the read-group section of audit.md.
 %%
-%% This is deliberately artificial load. Its purpose is to put concurrent query
-%% pressure on the database and on the runtime's schedulers while ingestion runs,
-%% so that read rate can be swept as a benchmark factor.
-%%
-%% Pacing lives here, not in the backend: this module is the only reader of
-%% READS_PER_SEC and READ_POOL_SIZE, so every backend gets identical cadence
-%% semantics -- the same split service_subscriber_db uses to keep the batch
-%% factors from being reinterpreted per backend.
-%%
-%% READS_PER_SEC = 0 means no readers at all: reader_count/0 returns 0 and the
-%% supervisor builds no child specs, so nothing here runs and no connection is
-%% opened.
+%% Pacing lives here, not in the backend: this module is the only reader of READS_PER_SEC and
+%% READ_POOL_SIZE, so every backend gets identical cadence semantics. READS_PER_SEC = 0 means no
+%% readers at all -- no actors, no connections, no timers.
 -module(service_subscriber_reader).
 -behaviour(gen_server).
 
@@ -60,10 +50,9 @@ reader_count() ->
 init([Index]) ->
     BackendMod = resolve_read_backend(),
     {ok, BackendState} = BackendMod:init(Index),
-    %% READS_PER_SEC is the aggregate across every reader, so each one targets its own share of it.
-    %% Keeping the knob aggregate is what leaves READ_POOL_SIZE a pure concurrency/connection
-    %% setting: changing it redistributes the same total read load instead of scaling it.
-    %% Mirrors the period computed in Reader.scala -- keep the formula in sync.
+    %% READS_PER_SEC is the aggregate across every reader, so each targets its share. That is what
+    %% leaves READ_POOL_SIZE a pure concurrency setting: changing it redistributes the same total
+    %% load instead of scaling it. Mirrors the formula in Reader.scala.
     PeriodMs = round(1000 * read_pool_size() / reads_per_sec()),
     schedule_read(0),
     {ok, #state{backend_mod   = BackendMod,
@@ -79,23 +68,16 @@ handle_call(_Req, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% Runs one read, records it, and arms the next against a fixed deadline.
+%% Runs one read, records it, and arms the next against a fixed deadline that advances by exactly one
+%% period per cycle. Sleeping period-minus-query-time instead let per-cycle overhead outside the
+%% measured read accumulate, and it differed enough between the arms to make them run different read
+%% loads at the same READS_PER_SEC; audit.md's read-group section has the measurements. Mirrors the
+%% pacing in Reader.scala.
 %%
-%% The deadline advances by exactly one period per cycle, and the timer is set to whatever is left
-%% until it. Sleeping period-minus-query-time instead would leave every cycle carrying whatever the
-%% runtime spends outside the measured read -- timer granularity, dispatch, GC -- which measured as a
-%% constant ~20ms per cycle in the Scala arm against ~1ms here. That is a per-arm constant, so the
-%% two arms would have run measurably different read loads at the same READS_PER_SEC. Pacing to a
-%% deadline absorbs a constant lateness completely: the next deadline is already set, so a late
-%% firing simply shortens the next sleep.
-%%
-%% The deadline is never left in the past (the max/2 below), so a reader that cannot keep up
-%% degrades to running flat out rather than accumulating a debt it would later burn off in a burst.
-%% Combined with arming only from a completed read, at most one read is ever in flight per reader:
-%% a repeating fixed-rate timer would instead keep enqueueing reads a slow database cannot serve,
-%% growing the mailbox without bound while the knob silently stopped describing the read rate.
-%% When the target is genuinely unreachable the achieved rate simply falls below it -- which is why
-%% reports must use subscriber_reads_total, not the configured value.
+%% max/2 keeps the deadline out of the past, so a reader that cannot keep up runs flat out instead of
+%% burning off a debt in a burst. With the next read armed only from a completed one, at most one is
+%% ever in flight, and an unreachable target shows up as an achieved rate below the configured one --
+%% which is why reports must use subscriber_reads_total and never the env var.
 handle_info(read, #state{backend_mod = Mod, backend_state = BS,
                          period_native = PeriodNative, next_due = NextDue} = State) ->
     Start = erlang:monotonic_time(),
@@ -135,9 +117,9 @@ reader_name(Index) ->
 reads_per_sec() ->
     list_to_integer(os:getenv("READS_PER_SEC", "0")).
 
-%% Number of readers, and so the number of PostgreSQL connections reads add on top of DB_POOL_SIZE.
-%% Deliberately independent of PUBLISHER_COUNT, so the read group's connection count stays constant
-%% and cannot drift if the benchmark anchor's publisher count is ever changed.
+%% Number of readers, and so the connections reads add on top of DB_POOL_SIZE. Deliberately
+%% independent of PUBLISHER_COUNT, so the read group's connection count cannot drift if the anchor's
+%% publisher count changes.
 read_pool_size() ->
     list_to_integer(os:getenv("READ_POOL_SIZE", "4")).
 

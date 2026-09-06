@@ -1,30 +1,14 @@
-%% @doc MySQL backend implementing the db_backend behaviour.
+%% @doc MySQL backend implementing the db_backend behaviour. One instance per pool worker,
+%% statements prepared once at init/2. Buffering and the batch triggers belong to the dispatcher
+%% (service_subscriber_db); what lives here is how a write is executed and how its ack is
+%% correlated back to the rows it covered.
 %%
-%% One instance is held per pool worker. Prepared statements are prepared once at
-%% init/2 to avoid a parse round-trip on every write.
+%% mysql-otp has no async API, so both write paths hand the blocking call to a short-lived spawned
+%% process that messages the ack back, keeping this backend on the same {async, State} contract as
+%% db_backend_timescaledb. It does not recover wire-level concurrency -- read finding G in audit.md
+%% before comparing pool_* across the two backends.
 %%
-%% This module does not buffer and does not own the batch triggers: the dispatcher
-%% (service_subscriber_db) does, and calls insert/5 or insert_batch/2 accordingly.
-%%
-%% Unlike epgsql, mysql-otp has no async API -- mysql:execute/3 is a gen_server:call.
-%% Both write paths therefore hand the blocking call to a short-lived spawned process
-%% that messages the ack back, so this backend still returns {async, State} and its
-%% acks still arrive through handle_result/2. That keeps the Erlang arm's execution
-%% model the same for both backends, so a timescaledb-vs-mysql difference is the
-%% database rather than a change of driver model.
-%%
-%% What the spawn does NOT recover is wire-level concurrency: the MySQL protocol has
-%% no pipelining, so one connection carries one query at a time and every helper
-%% queues at the connection process. In-flight writes are therefore capped at
-%% DB_POOL_SIZE here where epgsql can hold several per connection. See finding G in
-%% audit.md -- pool_* results are not comparable across the two backends.
-%%
-%% Connection parameters are read from environment variables at startup:
-%%   DB_HOST        (default: mysql)
-%%   DB_PORT        (default: 3306)
-%%   DB_USER        (default: root)
-%%   DB_PASSWORD    (default: mysql)
-%%   DB_NAME        (default: epu)
+%% Reads the five DB_* connection variables; their defaults live in docker-compose.mysql.yaml.
 -module(db_backend_mysql).
 -behaviour(db_backend).
 
@@ -34,8 +18,7 @@
 
 -record(my_state, {
     conn       :: pid(),
-    %% Number of rows the pre-built batch statement binds. A flush shorter than this
-    %% (a BATCH_TIMEOUT_MS flush on a partly filled buffer) cannot use it, because a
+    %% Rows the pre-built batch statement binds. A short flush cannot use it: a
     %% multi-row VALUES list has fixed arity.
     batch_size :: pos_integer(),
     %% Internal correlation map: our own Ref -> {MsgTimestampUs, ProcStartUs}
@@ -43,9 +26,8 @@
     pending    :: #{reference() => {integer(), integer()} | {batch, list()}}
 }).
 
-%% Statement names are fixed atoms, not per-index ones as in db_backend_timescaledb: each worker owns
-%% its own connection, so the names never collide, and fixed atoms keep this module off the dynamic
-%% atom-creation path entirely.
+%% Fixed atoms, not per-index names as in db_backend_timescaledb: each worker owns its own
+%% connection, so the names never collide and nothing here creates atoms at runtime.
 -define(INSERT_STMT,   insert_data).
 -define(STATUS_STMT,   insert_status).
 -define(BATCH_STMT,    batch_insert_data).
@@ -61,8 +43,6 @@ init(Index, #{batch_enabled := BatchEnabled, batch_size := BatchSize}) ->
     User   = os:getenv("DB_USER",     "root"),
     Pass   = os:getenv("DB_PASSWORD", "mysql"),
     DBName = os:getenv("DB_NAME",     "epu"),
-    %% The same five connection keys DbConfig reads in the Scala arm, which is what lets one
-    %% docker-compose.mysql.yaml configure both repos identically.
     {ok, Conn} = mysql:start_link([
         {host,     Host},
         {port,     Port},
@@ -93,11 +73,8 @@ insert(#my_state{conn = Conn, pending = P} = State, DeviceName, Value, MsgTs, Pr
 
 %% Hands a flushed buffer to a spawned helper as one multi-row INSERT and registers the batch ref.
 %% A full-size flush reuses the statement prepared at init; a short one (BATCH_TIMEOUT_MS fired
-%% before the buffer filled) needs its own, since a VALUES list has fixed arity where the
-%% TimescaleDB arm's array parameters do not. Mirrors MySQLBatchTarget.scala -- keep the two in sync.
+%% early) needs its own, since a VALUES list has fixed arity. Mirrors MySQLBatchTarget.scala.
 insert_batch(#my_state{conn = Conn, batch_size = BatchSize, pending = P} = State, Rows) ->
-    %% One O(n) pass for the count on top of the one that builds the params; at the swept batch
-    %% sizes that is cheaper than threading a counter through the dispatcher's contract.
     N      = length(Rows),
     Params = batch_params(Rows),
     Ref = dispatch(fun() ->
@@ -108,9 +85,8 @@ insert_batch(#my_state{conn = Conn, batch_size = BatchSize, pending = P} = State
     end),
     {async, State#my_state{pending = P#{Ref => {batch, Rows}}}}.
 
-%% Spawns a status write and drops its ack on the floor, matching the TimescaleDB backend, which
-%% fires the query async and never correlates the result. No ref is registered, so nothing reaches
-%% handle_result/2 for it.
+%% Spawns a status write and drops its ack, matching db_backend_timescaledb. No ref is registered,
+%% so nothing reaches handle_result/2 for it.
 insert_status(#my_state{conn = Conn} = State, DeviceName, Status) ->
     _ = spawn_link(fun() -> _ = mysql:execute(Conn, ?STATUS_STMT, [DeviceName, Status]), ok end),
     {ok, State}.
@@ -146,31 +122,27 @@ terminate(#my_state{conn = Conn}) ->
 
 %% --- Internal helpers ---
 
-%% Runs Fun in a short-lived process and posts its result back tagged with a fresh ref, which is what
-%% lets a driver with no async API still satisfy the behaviour's {async, State} contract.
+%% Runs Fun in a short-lived process and posts the result back tagged with a fresh ref, which is how
+%% a driver with no async API still satisfies the {async, State} contract. Acks may arrive out of
+%% dispatch order; nothing depends on it, since each ack carries the rows it covered.
 %%
-%% spawn_link, not spawn: mysql:execute/3 returns {error, _} for a query the server rejected, so the
-%% only way the helper crashes is the connection process dying, which leaves this worker unusable.
-%% Linking makes that kill the worker for the supervisor to restart, rather than silently dropping
-%% the ack and leaking its ref in `pending` forever.
-%%
-%% Acks may arrive out of the order they were dispatched. Nothing depends on that order: each ack
-%% carries the rows it covered, and latencies are stamped when it lands.
+%% spawn_link, not spawn: the only way the helper crashes is the connection process dying, which
+%% leaves this worker unusable. Linking kills it for the supervisor to restart, instead of leaking
+%% the ref in `pending` forever.
 dispatch(Fun) ->
     Ref    = make_ref(),
     Parent = self(),
     _ = spawn_link(fun() -> Parent ! {mysql_ack, Ref, Fun()} end),
     Ref.
 
-%% Builds the multi-row INSERT text for exactly N rows. Fixed arity is why the size has to be known:
-%% the statement prepared at init only fits a full batch.
+%% Builds the multi-row INSERT text for exactly N rows; the statement prepared at init fits only a
+%% full batch.
 batch_sql(N) ->
     Tuples = lists:join(", ", lists:duplicate(N, "(?, ?, ?)")),
     lists:flatten(["INSERT INTO Data (DeviceName, Value, Timestamp) VALUES ", Tuples]).
 
-%% Flattens the buffer into one positional parameter list matching batch_sql/1's placeholders.
-%% The DB-shaped timestamp is derived here, inside the pass that already builds the list, so nothing
-%% driver-specific has to travel down from the worker.
+%% Flattens the buffer into one positional parameter list matching batch_sql/1's placeholders. The
+%% DB-shaped timestamp is derived here so nothing driver-specific travels down from the worker.
 batch_params(Rows) ->
     lists:flatmap(
         fun({Name, Value, MsgTs, _ProcStart}) -> [Name, Value, micros_to_datetime(MsgTs)] end,
@@ -192,14 +164,10 @@ latencies_for({MsgTs, ProcStart}) ->
     FlushTime = os:system_time(microsecond),
     [{max(0, FlushTime - MsgTs), max(0, FlushTime - ProcStart)}].
 
-%% Converts epoch microseconds to the {{Y,Mo,D},{H,Mi,SecFloat}} tuple mysql-otp binds to DATETIME(6).
-%% Fractional seconds carry the microseconds, so the wire format's full precision reaches the column.
-%% UTC, matching Clock.toLocalDateTimeUtc in the Scala arm, so a reading lands at the same instant in
-%% both arms against a column type that stores no offset.
-%%
-%% Duplicated from db_backend_timescaledb:micros_to_datetime/1 rather than shared: the tuple shape
-%% coincides but the target column types do not, and the two must be free to diverge if either
-%% driver's binding changes. Keep them in step -- if one gains a fix, check the other.
+%% Converts epoch microseconds to the tuple mysql-otp binds to DATETIME(6); fractional seconds carry
+%% the microseconds. UTC, matching Clock.toLocalDateTimeUtc, because the column stores no offset.
+%% Deliberately not shared with db_backend_timescaledb:micros_to_datetime/1 -- same shape, different
+%% target type -- so check the other if this one gains a fix.
 micros_to_datetime(Us) ->
     Secs  = Us div 1000000,
     Micro = Us rem 1000000,

@@ -1,20 +1,13 @@
-%% @doc DB dispatcher — one GenServer per connection (pool of DB_POOL_SIZE workers).
+%% @doc DB dispatcher -- one GenServer per connection (pool of DB_POOL_SIZE workers), round-robin
+%% routed, each delegating to the backend module DB_BACKEND selects (default: timescaledb).
 %%
-%% Writes are distributed across workers via round-robin. The actual DB
-%% operations are delegated to a backend module selected at startup via the
-%% DB_BACKEND environment variable (default: timescaledb).
+%% Batching lives here, not in the backend: this module owns the row buffer, the BATCH_SIZE /
+%% BATCH_TIMEOUT_MS triggers and the flush timer, and hands the backend either a single row or a
+%% whole flushed buffer, so every backend sees identical batching semantics. Mirrors
+%% BatchWriterActor.scala -- keep the flush triggers in sync.
 %%
-%% Batching lives here, not in the backend: this module owns the row buffer,
-%% the BATCH_SIZE / BATCH_TIMEOUT_MS triggers and the flush timer, and hands the
-%% backend either a single row (insert/5) or a whole flushed buffer
-%% (insert_batch/2). Every backend therefore sees identical batching semantics,
-%% which is what makes the swept batch factors comparable across backends.
-%% Mirrors the Scala BatchWriterActor -- keep the flush triggers in sync.
-%%
-%% The backend remains fully responsible for async correlation and latency
-%% computation. The dispatcher routes casts, forwards all other incoming
-%% messages to the backend via handle_result/2, and records the latency
-%% pairs the backend returns.
+%% Async correlation and latency computation stay with the backend. The dispatcher forwards every
+%% message it does not own to handle_result/2 and records the latency pairs that come back.
 -module(service_subscriber_db).
 -behaviour(gen_server).
 
