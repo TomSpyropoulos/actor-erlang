@@ -34,7 +34,8 @@
 %% latency does not drift upward with elapsed run time the way an unbounded scan would. No device
 %% filter, so the reader needs no knowledge of which topics exist. Byte-identical to the query in
 %% TimescaleReadTarget.scala -- if the two arms ever issue different SQL the group compares query
-%% plans instead of runtimes, so keep them in sync.
+%% plans instead of runtimes, so keep them in sync. The rule is per backend: db_read_backend_mysql
+%% and MySQLReadTarget.scala must match each other, not this pair.
 -define(READ_SQL,
         "SELECT avg(Value), count(*) FROM Data WHERE Timestamp > now() - interval '5 seconds'").
 

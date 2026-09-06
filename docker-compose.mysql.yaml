@@ -1,0 +1,57 @@
+# MySQL fragment: everything specific to DB_BACKEND=mysql. Loaded alongside docker-compose.yaml --
+# by bench.sh via an explicit second -f, and by the root .env's COMPOSE_FILE for hand-run
+# `docker compose` commands. A second database is a sibling docker-compose.<name>.yaml rather than
+# an edit to the base compose, so only the selected database's container ever starts and an idle one
+# can never be charged to cpu_cores/mem_mb.
+services:
+  # MySQL: the relational counterpart to timescaledb, run on stock server config with no tuning
+  # flags so neither database is given an advantage the other does not get.
+  mysql:
+    image: mysql:8.4
+    container_name: mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: mysql
+      MYSQL_DATABASE: epu
+    volumes:
+      - mysql-storage:/var/lib/mysql
+      - ./mysql/init/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      # --protocol=TCP forces a TCP probe, the same fix and the same reason as the timescaledb
+      # fragment's `-h 127.0.0.1`. The entrypoint runs a temporary init-time server while init.sql
+      # executes; a socket probe answers during that window, so the container was marked healthy
+      # during initdb, dependents were released, and MySQL then restarted to bind TCP and refused
+      # connections. Every rep re-runs initdb because bench.sh tears down with `down -v`, so that
+      # window would reopen on every single run.
+      test: ["CMD-SHELL", "mysqladmin ping --protocol=TCP -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # The publisher never touches the database. It waits anyway so publishers do not start ahead of
+  # the rest of the stack -- that ordering is what bench.sh's startup gates measure, and it is kept
+  # identical to the timescaledb fragment so the two backends' gate figures stay comparable.
+  publisher:
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  # Connection config for this backend. Both arms read the same five keys -- see db_backend_mysql.erl
+  # in actor-erlang and DbConfig in Database.scala in actor-scala -- so this file is byte-identical
+  # in the two repos.
+  subscriber:
+    environment:
+      DB_HOST:     ${DB_HOST:-mysql}
+      DB_PORT:     ${DB_PORT:-3306}
+      DB_NAME:     ${DB_NAME:-epu}
+      DB_USER:     ${DB_USER:-root}
+      DB_PASSWORD: ${DB_PASSWORD:-mysql}
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql-storage: {}

@@ -19,12 +19,17 @@
 %% (1..POOL_SIZE) and can be used to name per-worker resources such as
 %% prepared statements.
 %%
-%% Opts carries the dispatcher's batching decision as #{batch_enabled => boolean()}.
-%% It is passed in rather than re-read from the environment so BATCH_ENABLED has a
-%% single reader; a backend should use it only to decide which resources to set up
-%% (e.g. skip preparing a batch statement that will never be executed).
+%% Opts carries the dispatcher's batching decision as
+%% #{batch_enabled => boolean(), batch_size => pos_integer()}. Both are passed in
+%% rather than re-read from the environment so BATCH_ENABLED and BATCH_SIZE keep a
+%% single reader; a backend should use them only to decide which resources to set up
+%% (e.g. skip preparing a batch statement that will never be executed), never to make
+%% its own flush decisions -- the dispatcher owns those. batch_size is here because a
+%% backend whose batch statement has fixed arity (a multi-row VALUES list, as in
+%% db_backend_mysql) must know the size to pre-build it, while one taking array
+%% parameters (db_backend_timescaledb) does not and ignores it.
 -callback init(Index :: non_neg_integer(),
-               Opts  :: #{batch_enabled := boolean()}) ->
+               Opts  :: #{batch_enabled := boolean(), batch_size := pos_integer()}) ->
     {ok, BackendState :: term()}.
 
 %% Submit one sensor-data row. Called only when batching is off.

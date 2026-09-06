@@ -9,6 +9,7 @@
         inets,
 		emqtt,
         epgsql,
+        mysql,
         prometheus,
         prometheus_httpd
     ]},

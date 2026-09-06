@@ -68,7 +68,8 @@ insert_status(DeviceName, Status) ->
     gen_server:cast(worker_name(next_index()), {insert_status, DeviceName, Status}).
 
 %% Reads the batching config (the only place it is read), then resolves the backend module and
-%% delegates initialisation to it, passing batch_enabled so it can skip resources it will never use.
+%% delegates initialisation to it, passing batch_enabled and batch_size so it can skip resources it
+%% will never use and pre-build any whose shape depends on the size. The flush decisions stay here.
 %% No timer is armed here: the first buffered row arms it, and arming one against an empty buffer
 %% only schedules a wake-up with nothing to flush.
 init([Index]) ->
@@ -76,7 +77,8 @@ init([Index]) ->
     BatchSize    = list_to_integer(os:getenv("BATCH_SIZE",       "100")),
     BatchTimeMs  = list_to_integer(os:getenv("BATCH_TIMEOUT_MS", "1000")),
     BackendMod   = resolve_backend(),
-    {ok, BackendState} = BackendMod:init(Index, #{batch_enabled => BatchEnabled}),
+    {ok, BackendState} = BackendMod:init(Index, #{batch_enabled => BatchEnabled,
+                                                  batch_size    => BatchSize}),
     {ok, #state{backend_mod      = BackendMod,
                 backend_state    = BackendState,
                 batch_enabled    = BatchEnabled,
@@ -169,6 +171,7 @@ next_index() ->
 resolve_backend() ->
     case os:getenv("DB_BACKEND", "timescaledb") of
         "timescaledb" -> db_backend_timescaledb;
+        "mysql"       -> db_backend_mysql;
         Unknown       -> error({unknown_db_backend, Unknown})
     end.
 
