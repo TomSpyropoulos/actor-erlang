@@ -165,6 +165,7 @@ resolve_backend() ->
     case os:getenv("DB_BACKEND", "timescaledb") of
         "timescaledb" -> db_backend_timescaledb;
         "mysql"       -> db_backend_mysql;
+        "influxdb"    -> db_backend_influxdb;
         Unknown       -> error({unknown_db_backend, Unknown})
     end.
 

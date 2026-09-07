@@ -11,7 +11,7 @@ The system consists of the following components:
 3.  **[Service Subscriber](service_subscriber/)**: An Erlang application that consumes messages from the `sensors/#` wildcard topic. It dynamically creates a dedicated **Worker Actor** (GenServer) for each unique sensor topic to maintain state (running sum and last timestamp) while tracking metrics. Features an ultra-fast lock-free ETS-based dynamic actor routing table and a parallel DB connection pool. The write path is pluggable: the active backend is selected at runtime via `DB_BACKEND`.
 4.  **Prometheus**: Scrapes metrics from the containers and the host system.
 5.  **Grafana**: Provides a visual dashboard for monitoring container resource usage (CPU/RAM) and application latency.
-6.  **TimescaleDB**: A PostgreSQL extension for high-performance time-series data storage.
+6.  **The database**: selected by `DB_BACKEND` — TimescaleDB (default), MySQL or InfluxDB.
 
 ## 🚀 Getting Started
 
@@ -172,7 +172,7 @@ The target is still a ceiling rather than a guarantee, so **report the achieved 
 (`subscriber_reads_total`), never the configured one** — an unreachable target shows up as an achieved rate
 below it rather than as an error, at any setting.
 
-Reads also change the connection budget: total PostgreSQL connections are `DB_POOL_SIZE + READ_POOL_SIZE`
+Reads also change the connection budget: total database connections are `DB_POOL_SIZE + READ_POOL_SIZE`
 while reads are on and `DB_POOL_SIZE` when `READS_PER_SEC=0`, identically in both arms. `READ_POOL_SIZE` is
 documented but never swept — holding it fixed is what keeps the group's connection count constant and
 independent of `PUBLISHER_COUNT`, so the read curve is not confounded by a moving connection count.
@@ -186,17 +186,18 @@ The no-batch-vs-batch comparison is the `Batching` group: `batching_off.env` ver
 |----------|---------|-------------|
 | `PUBLISHER_COUNT` | `1` | Number of publisher containers (`--scale publisher=N`) |
 | `DB_BACKEND` | `timescaledb` | Which database to run against. Set on the command line, **not** in a scenario file; selects the `docker-compose.<backend>.yaml` fragment |
-| `DB_HOST` | `timescaledb` | Database host (`mysql` under `DB_BACKEND=mysql`). Supplied by the backend's compose fragment; identical key in both arms |
-| `DB_PORT` | `5432` | Database port (`3306` under `DB_BACKEND=mysql`). Supplied by the backend's compose fragment; identical key in both arms |
-| `DB_NAME` | `epu` | Database name. Supplied by the backend's compose fragment; identical key in both arms |
-| `DB_USER` / `DB_PASSWORD` | `postgres` | Database credentials (`root` / `mysql` under `DB_BACKEND=mysql`). Supplied by the backend's compose fragment |
-| `DB_POOL_SIZE` | `20` | Number of DB pool workers, and the total PostgreSQL connection count (one per worker). Status writes round-robin over the same pool |
+| `DB_HOST` | `timescaledb` | Database host (`mysql` or `influxdb` under those backends). Supplied by the backend's compose fragment; identical key in both arms |
+| `DB_PORT` | `5432` | Database port (`3306` MySQL, `8086` InfluxDB). Supplied by the backend's compose fragment; identical key in both arms |
+| `DB_NAME` | `epu` | Database name, and the bucket name under `DB_BACKEND=influxdb`. Supplied by the backend's compose fragment; identical key in both arms |
+| `DB_USER` / `DB_PASSWORD` | `postgres` | Database credentials (`root` / `mysql` under MySQL). Supplied by the backend's compose fragment. Under `DB_BACKEND=influxdb` these seed the initial user only — the API authenticates with `DB_TOKEN` — and InfluxDB enforces an 8-character minimum password |
+| `DB_ORG` / `DB_TOKEN` | `epu` / `epu-benchmark-token` | InfluxDB only: the organisation and API token. The two keys beyond the five every backend reads; supplied by the compose fragment and read identically in both arms |
+| `DB_POOL_SIZE` | `20` | Number of DB pool workers, and the total database connection count (one per worker). Status writes round-robin over the same pool. Under `DB_BACKEND=influxdb` it caps concurrent HTTP requests instead of counting pooled connections; see finding J in `../audit.md` |
 | `BATCH_ENABLED` | `false` | Enable row buffering |
 | `BATCH_SIZE` | `100` | Flush when buffer reaches this many rows |
 | `BATCH_TIMEOUT_MS` | `1000` | Flush after this many ms even if buffer is not full |
 | `PAYLOAD_PADDING_BYTES` | `0` | Extra filler bytes added as a trailing `"padding"` field on top of the shared base payload (identical in both arms), for payload-size benchmarks |
 | `READS_PER_SEC` | `0` | Aggregate target read rate across all readers. `0` starts no readers at all — no actors, no connections, no timers. Achieved rate falls below this once the target exceeds what the readers can sustain |
-| `READ_POOL_SIZE` | `4` | Reader actors, each holding one PostgreSQL connection, so total connections are `DB_POOL_SIZE + READ_POOL_SIZE` while reads are on. Documented but not swept |
+| `READ_POOL_SIZE` | `4` | Reader actors, each holding one database connection, so total connections are `DB_POOL_SIZE + READ_POOL_SIZE` while reads are on. Documented but not swept |
 | `RUN_DURATION` | _(unset)_ | Fixed measurement window in seconds. Set it (or use `bench.sh all`, which defaults it to `90`) for an unattended run; leave unset for an interactive `Ctrl+C` run |
 | `WARMUP_SECONDS` | `30` | Startup transient excluded from every reported figure. Must be at least the 15s rate window, or the first samples kept are still contaminated by the ramp |
 | `STARTUP_TIMEOUT` | `180` | Seconds a rep may take to bring up a scrapeable metrics endpoint before it is skipped |
@@ -210,19 +211,29 @@ The no-batch-vs-batch comparison is the `Batching` group: `batching_off.env` ver
 |-------|---------|-------------|
 | `timescaledb` (default) | `db_backend_timescaledb`, `db_read_backend_timescaledb` | PostgreSQL/TimescaleDB via epgsql, async writes |
 | `mysql` | `db_backend_mysql`, `db_read_backend_mysql` | MySQL 8.4 via mysql-otp. The driver is synchronous, so writes are handed to a short-lived spawned process and the ack is messaged back — the backend still satisfies the behaviour's `{async, State}` contract |
+| `influxdb` | `db_backend_influxdb`, `db_read_backend_influxdb` | InfluxDB 2.7 over its HTTP API via `httpc`, no driver dependency. Writes are line protocol posted asynchronously, so the ack reaches the worker's mailbox and the behaviour's `{async, State}` contract is satisfied without a helper process |
 
-Each value needs its own `<backend>/init/init.sql`: the schema is written in that database's own
-dialect, so the two are equivalent rather than identical.
+Each SQL value needs its own `<backend>/init/init.sql`, written in that database's own dialect, so
+the schemas are equivalent rather than identical. `influxdb` has none: it is schema-on-write, the
+image creates the bucket, and what the columns are is decided by the backend's line-protocol
+builders. See findings H and L in `../audit.md`.
 
 Adding a backend is three things in this repo: the modules, their one-line registrations, and a
 `docker-compose.<backend>.yaml` fragment carrying that database's service, volume and connection
-variables. Nothing in `benchmarking/` changes — the scenario files are backend-agnostic.
+variables, plus a schema if that database needs one. Nothing in `benchmarking/` changes — the
+scenario files are backend-agnostic.
 
 > **MySQL cannot pipeline.** One connection carries one query at a time, so in-flight writes are
 > capped at `DB_POOL_SIZE` where epgsql can hold several per connection. With `BATCH_ENABLED=false`
 > that cap is binding at the swept load and the subscriber builds an unbounded backlog; with
 > batching on it keeps up comfortably. See finding G in `../audit.md` — `pool_*` and `batching_*`
-> results are not comparable across the two databases.
+> results are not comparable across databases.
+
+> **InfluxDB is HTTP, which changes three things.** `DB_POOL_SIZE` caps concurrent requests rather
+> than counting connections; a write is an upsert keyed by timestamp rather than an append; and one
+> Flux read costs far more than its SQL equivalent, so the `reads_*` ladder is already at its ceiling
+> by `reads_0050`. See findings I through O in `../audit.md` before comparing this backend's
+> `pool_*`, `batching_*` or `reads_*` numbers against the SQL ones.
 
 ## 🧠 Deep Dive: Erlang Concurrency
 
@@ -251,5 +262,5 @@ The current implementation uses **GenServers** to encapsulate state and logic, m
 - **Messaging**: MQTT (Mosquitto/via emqtt)
 - **JSON**: Built-in json (OTP 27+)
 - **Observability**: Prometheus & Grafana
-- **Database**: Pluggable backends (TimescaleDB default)
+- **Database**: Pluggable backends — TimescaleDB (default), MySQL, InfluxDB
 - **Deployment**: Docker & Docker Compose

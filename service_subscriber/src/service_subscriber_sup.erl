@@ -49,7 +49,7 @@ init([]) ->
 
     %% Artificial read load, sized by READ_POOL_SIZE and paced by READS_PER_SEC. reader_count/0
     %% returns 0 when READS_PER_SEC is 0, so the default configuration builds no reader children at
-    %% all -- no processes, no timers, and no PostgreSQL connections beyond the DB pool's.
+    %% all -- no processes, no timers, and no database connections beyond the DB pool's.
     Readers = [
         #{id      => {service_subscriber_reader, I},
           start   => {service_subscriber_reader, start_link, [I]},

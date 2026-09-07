@@ -1,0 +1,68 @@
+# InfluxDB fragment: everything specific to DB_BACKEND=influxdb. Loaded alongside
+# docker-compose.yaml -- by bench.sh via an explicit second -f, and by the root .env's COMPOSE_FILE
+# for hand-run `docker compose` commands.
+#
+# Unlike the two SQL fragments there is no influxdb/init/init.sql: InfluxDB is schema-on-write, and
+# the only thing to create is the bucket, which the image's setup mode creates itself. The schema
+# such as it is lives in the two arms' line-protocol builders; see finding L in audit.md.
+services:
+  # InfluxDB 2.7, run on stock config with no tuning flags so no database is given an advantage the
+  # others do not get. Setup mode provisions org, bucket and admin token on a fresh volume; it is
+  # skipped silently on a volume that already holds a database, which is safe only because bench.sh
+  # tears down with `down -v` between reps. The backends probe readiness at init rather than trust it.
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${DB_USER:-influx}
+      # InfluxDB enforces an 8-character minimum here, which the other two databases do not.
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${DB_PASSWORD:-influxdb}
+      DOCKER_INFLUXDB_INIT_ORG: ${DB_ORG:-epu}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${DB_NAME:-epu}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${DB_TOKEN:-epu-benchmark-token}
+      # Infinite, matching the SQL tables, which have no retention either.
+      DOCKER_INFLUXDB_INIT_RETENTION: 0
+    volumes:
+      - influxdb-storage:/var/lib/influxdb2
+    healthcheck:
+      # The two SQL fragments force TCP because their init-time server answers on the same socket as
+      # the real one. This image has no such window: setup runs against a temporary server on :9999
+      # and only the real one ever binds 8086. Listing a bucket is still the better probe, since it
+      # needs the org and token setup creates, so it also catches a stale volume that skipped setup.
+      test: ["CMD-SHELL", "influx bucket list --host http://127.0.0.1:8086 --org $$DOCKER_INFLUXDB_INIT_ORG --token $$DOCKER_INFLUXDB_INIT_ADMIN_TOKEN > /dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # The publisher never touches the database. It waits anyway so publishers do not start ahead of
+  # the rest of the stack -- that ordering is what bench.sh's startup gates measure, and it is kept
+  # identical to the other fragments so the backends' gate figures stay comparable.
+  publisher:
+    depends_on:
+      influxdb:
+        condition: service_healthy
+
+  # Connection config for this backend. The same five keys the other two fragments supply, plus the
+  # two InfluxDB needs -- DB_NAME is the bucket, and DB_USER/DB_PASSWORD are read only by setup
+  # above, since the API authenticates with DB_TOKEN. Both arms read all seven, so this file is
+  # byte-identical in the two repos.
+  subscriber:
+    environment:
+      DB_HOST:     ${DB_HOST:-influxdb}
+      DB_PORT:     ${DB_PORT:-8086}
+      DB_NAME:     ${DB_NAME:-epu}
+      DB_USER:     ${DB_USER:-influx}
+      DB_PASSWORD: ${DB_PASSWORD:-influxdb}
+      DB_ORG:      ${DB_ORG:-epu}
+      DB_TOKEN:    ${DB_TOKEN:-epu-benchmark-token}
+    depends_on:
+      influxdb:
+        condition: service_healthy
+
+volumes:
+  influxdb-storage: {}
