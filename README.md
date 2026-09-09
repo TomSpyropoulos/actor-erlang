@@ -264,3 +264,7 @@ The current implementation uses **GenServers** to encapsulate state and logic, m
 - **Observability**: Prometheus & Grafana
 - **Database**: Pluggable backends — TimescaleDB (default), MySQL, InfluxDB
 - **Deployment**: Docker & Docker Compose
+
+## 📄 License
+
+MIT — see [`LICENSE`](LICENSE).
