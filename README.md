@@ -191,7 +191,7 @@ The no-batch-vs-batch comparison is the `Batching` group: `batching_off.env` ver
 | `DB_NAME` | `epu` | Database name, and the bucket name under `DB_BACKEND=influxdb`. Supplied by the backend's compose fragment; identical key in both arms |
 | `DB_USER` / `DB_PASSWORD` | `postgres` | Database credentials (`root` / `mysql` under MySQL). Supplied by the backend's compose fragment. Under `DB_BACKEND=influxdb` these seed the initial user only — the API authenticates with `DB_TOKEN` — and InfluxDB enforces an 8-character minimum password |
 | `DB_ORG` / `DB_TOKEN` | `epu` / `epu-benchmark-token` | InfluxDB only: the organisation and API token. The two keys beyond the five every backend reads; supplied by the compose fragment and read identically in both arms |
-| `DB_POOL_SIZE` | `20` | Number of DB pool workers, and the total database connection count (one per worker). Status writes round-robin over the same pool. Under `DB_BACKEND=influxdb` it caps concurrent HTTP requests instead of counting pooled connections; see finding J in `../audit.md` |
+| `DB_POOL_SIZE` | `20` | Number of DB pool workers, and the total database connection count (one per worker). Status writes round-robin over the same pool. Under `DB_BACKEND=influxdb` it caps concurrent HTTP requests instead of counting pooled connections, so the connection count is only an upper bound |
 | `BATCH_ENABLED` | `false` | Enable row buffering |
 | `BATCH_SIZE` | `100` | Flush when buffer reaches this many rows |
 | `BATCH_TIMEOUT_MS` | `1000` | Flush after this many ms even if buffer is not full |
@@ -216,7 +216,8 @@ The no-batch-vs-batch comparison is the `Batching` group: `batching_off.env` ver
 Each SQL value needs its own `<backend>/init/init.sql`, written in that database's own dialect, so
 the schemas are equivalent rather than identical. `influxdb` has none: it is schema-on-write, the
 image creates the bucket, and what the columns are is decided by the backend's line-protocol
-builders. See findings H and L in `../audit.md`.
+builders. So no file pins the schema across the two arms, and a missing `precision=us` on the write
+URL fails silently by landing every point in 1970.
 
 Adding a backend is three things in this repo: the modules, their one-line registrations, and a
 `docker-compose.<backend>.yaml` fragment carrying that database's service, volume and connection
@@ -226,14 +227,15 @@ scenario files are backend-agnostic.
 > **MySQL cannot pipeline.** One connection carries one query at a time, so in-flight writes are
 > capped at `DB_POOL_SIZE` where epgsql can hold several per connection. With `BATCH_ENABLED=false`
 > that cap is binding at the swept load and the subscriber builds an unbounded backlog; with
-> batching on it keeps up comfortably. See finding G in `../audit.md` — `pool_*` and `batching_*`
-> results are not comparable across databases.
+> batching on it keeps up comfortably. So `pool_*` and `batching_*` results are not comparable
+> across databases.
 
 > **InfluxDB is HTTP, which changes three things.** `DB_POOL_SIZE` caps concurrent requests rather
 > than counting connections; a write is an upsert keyed by timestamp rather than an append; and one
 > Flux read costs far more than its SQL equivalent, so the `reads_*` ladder is already at its ceiling
-> by `reads_0050`. See findings I through O in `../audit.md` before comparing this backend's
-> `pool_*`, `batching_*` or `reads_*` numbers against the SQL ones.
+> by `reads_0050`. HTTP also connects lazily, so both backends probe for readiness at startup rather
+> than let a rep ingest while committing nothing. This backend's `pool_*`, `batching_*` and `reads_*`
+> numbers are not comparable with the SQL ones.
 
 ## 🧠 Deep Dive: Erlang Concurrency
 
