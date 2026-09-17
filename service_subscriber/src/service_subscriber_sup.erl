@@ -1,5 +1,5 @@
 %% @doc Root supervisor. Starts children in dependency order:
-%%      metrics → worker_sup → db pool (DB_POOL_SIZE workers) →
+%%      metrics → worker_sup → backend shared processes, if any → db pool (DB_POOL_SIZE workers) →
 %%      readers (READ_POOL_SIZE, only when READS_PER_SEC > 0) → mqtt client.
 %%
 %% The readers are an independent branch: nothing in the ingest path routes to
@@ -20,8 +20,8 @@ start_link() ->
     ?LOG_INFO("Subscriber Supervisor Started"),
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
-%% Builds child specs for metrics, worker supervisor, DB pool, readers, and MQTT client in
-%% dependency order.
+%% Builds child specs for metrics, worker supervisor, the backend's shared processes, DB pool,
+%% readers, and MQTT client in dependency order.
 init([]) ->
     SupFlags = #{
         strategy  => one_for_one,
@@ -73,7 +73,7 @@ init([]) ->
           shutdown => infinity,
           type    => supervisor,
           modules => [service_subscriber_worker_sup]}
-    ] ++ DBWorkers ++ Readers ++ [
+    ] ++ service_subscriber_db:backend_child_specs() ++ DBWorkers ++ Readers ++ [
         #{id      => service_subscriber_mqtt,
           start   => {service_subscriber_mqtt, start_link, []},
           restart => permanent,

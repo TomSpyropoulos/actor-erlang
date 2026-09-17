@@ -13,7 +13,7 @@
 
 -include_lib("kernel/include/logger.hrl").
 
--export([start_link/1, init_counter/0, insert/4, insert_status/2]).
+-export([start_link/1, init_counter/0, backend_child_specs/0, insert/4, insert_status/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(COUNTER_KEY,   {?MODULE, round_robin_counter}).
@@ -50,6 +50,16 @@ init_counter() ->
     Ref = atomics:new(1, [{signed, false}]),
     persistent_term:put(?COUNTER_KEY,   Ref),
     persistent_term:put(?POOL_SIZE_KEY, PoolSize).
+
+%% Whatever shared processes the selected backend declares, for the root supervisor to start before
+%% the pool. Most backends declare none, which is why the callback is optional.
+backend_child_specs() ->
+    Mod = resolve_backend(),
+    {module, Mod} = code:ensure_loaded(Mod),
+    case erlang:function_exported(Mod, child_specs, 0) of
+        true  -> Mod:child_specs();
+        false -> []
+    end.
 
 %% @doc Async insert of a sensor data row. Non-blocking for the caller.
 insert(DeviceName, Value, MsgTimestampUs, ProcessingStartUs) ->
@@ -166,6 +176,7 @@ resolve_backend() ->
         "timescaledb" -> db_backend_timescaledb;
         "mysql"       -> db_backend_mysql;
         "influxdb"    -> db_backend_influxdb;
+        "sqlite"      -> db_backend_sqlite;
         Unknown       -> error({unknown_db_backend, Unknown})
     end.
 

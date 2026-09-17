@@ -10,6 +10,7 @@
 		emqtt,
         epgsql,
         mysql,
+        esqlite,
         prometheus,
         prometheus_httpd
     ]},

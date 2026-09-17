@@ -129,6 +129,7 @@ resolve_read_backend() ->
         "timescaledb" -> db_read_backend_timescaledb;
         "mysql"       -> db_read_backend_mysql;
         "influxdb"    -> db_read_backend_influxdb;
+        "sqlite"      -> db_read_backend_sqlite;
         Unknown       -> error({unknown_db_backend, Unknown})
     end.
 

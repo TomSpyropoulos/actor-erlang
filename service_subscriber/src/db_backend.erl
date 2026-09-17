@@ -28,14 +28,16 @@
 %%
 %% Return {async, NewState} if the write was dispatched asynchronously: handle_result/2 is then
 %% called for every subsequent message until the backend claims the ack. Return {sync, ...} if the
-%% write completed inline and the backend measured the latency itself.
+%% write completed inline and the backend measured the latency itself; the list form lets it report a
+%% failed write as [], as handle_result/2 does.
 -callback insert(BackendState    :: term(),
                  DeviceName      :: binary(),
                  Value           :: integer(),
                  MsgTimestampUs  :: integer(),
                  ProcStartUs     :: integer()) ->
     {async, NewBackendState :: term()} |
-    {sync, {E2EUs :: integer(), SubToDbUs :: integer()}, NewBackendState :: term()}.
+    {sync, {E2EUs :: integer(), SubToDbUs :: integer()}, NewBackendState :: term()} |
+    {sync, [{E2EUs :: integer(), SubToDbUs :: integer()}], NewBackendState :: term()}.
 
 %% Submit a whole flushed buffer as one write. Called only when batching is on.
 %%
@@ -67,6 +69,11 @@
 -callback handle_result(Message :: term(), BackendState :: term()) ->
     {match,    [{E2EUs :: integer(), SubToDbUs :: integer()}], NewBackendState :: term()} |
     {no_match, NewBackendState :: term()}.
+
+%% Optional. Processes every pool worker of this backend shares, such as db_backend_sqlite's write
+%% lock. The root supervisor starts them before the pool, so a worker's init/2 can rely on them.
+-callback child_specs() -> [supervisor:child_spec()].
+-optional_callbacks([child_specs/0]).
 
 %% Called when the pool worker is shutting down. Close connections and
 %% release any resources held in BackendState.

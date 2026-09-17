@@ -1,0 +1,20 @@
+# SQLite fragment: everything specific to DB_BACKEND=sqlite. Loaded alongside docker-compose.yaml the
+# same way as the other fragments. SQLite is a library inside the subscriber, so this file adds no
+# service, no healthcheck and no depends_on edge; it only extends the subscriber. See findings P
+# through U in audit.md.
+services:
+  # Both arms read these two keys -- see db_backend_sqlite.erl in actor-erlang and SQLiteBackend in
+  # actor-scala -- so this file is byte-identical in the two repos. The five network DB_* keys mean
+  # nothing to a file and are left unset.
+  subscriber:
+    environment:
+      DB_PATH:     ${DB_PATH:-/var/lib/sqlite/epu.db}
+      DB_INIT_DIR: ${DB_INIT_DIR:-/sqlite/init}
+    volumes:
+      # A named volume, not the container's writable layer, so `down -v` removes the database and
+      # overlayfs write cost stays out of the results.
+      - sqlite-storage:/var/lib/sqlite
+      - ./sqlite/init:/sqlite/init:ro
+
+volumes:
+  sqlite-storage: {}
