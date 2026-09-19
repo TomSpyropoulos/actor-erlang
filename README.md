@@ -11,7 +11,7 @@ The system consists of the following components:
 3.  **[Service Subscriber](service_subscriber/)**: An Erlang application that consumes messages from the `sensors/#` wildcard topic. It dynamically creates a dedicated **Worker Actor** (GenServer) for each unique sensor topic to maintain state (running sum and last timestamp) while tracking metrics. Features an ultra-fast lock-free ETS-based dynamic actor routing table and a parallel DB connection pool. The write path is pluggable: the active backend is selected at runtime via `DB_BACKEND`.
 4.  **Prometheus**: Scrapes metrics from the containers and the host system.
 5.  **Grafana**: Provides a visual dashboard for monitoring container resource usage (CPU/RAM) and application latency.
-6.  **The database**: selected by `DB_BACKEND` — TimescaleDB (default), MySQL, InfluxDB or SQLite. SQLite is a library, so it runs inside the subscriber rather than in a container of its own.
+6.  **The database**: selected by `DB_BACKEND` — TimescaleDB (default), MySQL, InfluxDB, SQLite or MongoDB. SQLite is a library, so it runs inside the subscriber rather than in a container of its own.
 
 ## 🚀 Getting Started
 
@@ -186,13 +186,13 @@ The no-batch-vs-batch comparison is the `Batching` group: `batching_off.env` ver
 |----------|---------|-------------|
 | `PUBLISHER_COUNT` | `1` | Number of publisher containers (`--scale publisher=N`) |
 | `DB_BACKEND` | `timescaledb` | Which database to run against. Set on the command line, **not** in a scenario file; selects the `docker-compose.<backend>.yaml` fragment |
-| `DB_HOST` | `timescaledb` | Database host (`mysql` or `influxdb` under those backends). Supplied by the backend's compose fragment; identical key in both arms |
-| `DB_PORT` | `5432` | Database port (`3306` MySQL, `8086` InfluxDB). Supplied by the backend's compose fragment; identical key in both arms |
+| `DB_HOST` | `timescaledb` | Database host (`mysql`, `influxdb` or `mongodb` under those backends). Supplied by the backend's compose fragment; identical key in both arms |
+| `DB_PORT` | `5432` | Database port (`3306` MySQL, `8086` InfluxDB, `27017` MongoDB). Supplied by the backend's compose fragment; identical key in both arms |
 | `DB_NAME` | `epu` | Database name, and the bucket name under `DB_BACKEND=influxdb`. Supplied by the backend's compose fragment; identical key in both arms |
-| `DB_USER` / `DB_PASSWORD` | `postgres` | Database credentials (`root` / `mysql` under MySQL). Supplied by the backend's compose fragment. Under `DB_BACKEND=influxdb` these seed the initial user only — the API authenticates with `DB_TOKEN` — and InfluxDB enforces an 8-character minimum password |
+| `DB_USER` / `DB_PASSWORD` | `postgres` | Database credentials (`root` / `mysql` under MySQL, `root` / `mongo` under MongoDB, which authenticates against its `admin` database). Supplied by the backend's compose fragment. Under `DB_BACKEND=influxdb` these seed the initial user only — the API authenticates with `DB_TOKEN` — and InfluxDB enforces an 8-character minimum password |
 | `DB_ORG` / `DB_TOKEN` | `epu` / `epu-benchmark-token` | InfluxDB only: the organisation and API token. The two keys beyond the five every backend reads; supplied by the compose fragment and read identically in both arms |
 | `DB_PATH` / `DB_INIT_DIR` | `/var/lib/sqlite/epu.db` / `/sqlite/init` | SQLite only: the database file, on the `sqlite-storage` volume, and the mounted directory holding `init.sql` and `connection.sql`. The five network keys above go unused. Supplied by the compose fragment and read identically in both arms |
-| `DB_POOL_SIZE` | `20` | Number of DB pool workers, and the total database connection count (one per worker). Status writes round-robin over the same pool. Under `DB_BACKEND=influxdb` it caps concurrent HTTP requests instead of counting pooled connections, so the connection count is only an upper bound. Under `DB_BACKEND=sqlite` it is the number of connections queuing on one write lock |
+| `DB_POOL_SIZE` | `20` | Number of DB pool workers, and the total database connection count (one per worker). Status writes round-robin over the same pool. Under `DB_BACKEND=influxdb` it caps concurrent HTTP requests instead of counting pooled connections, so the connection count is only an upper bound. Under `DB_BACKEND=sqlite` it is the number of connections queuing on one write lock. Under `DB_BACKEND=mongodb` each connection carries several pipelined writes at once |
 | `BATCH_ENABLED` | `false` | Enable row buffering |
 | `BATCH_SIZE` | `100` | Flush when buffer reaches this many rows |
 | `BATCH_TIMEOUT_MS` | `1000` | Flush after this many ms even if buffer is not full |
@@ -214,6 +214,7 @@ The no-batch-vs-batch comparison is the `Batching` group: `batching_off.env` ver
 | `mysql` | `db_backend_mysql`, `db_read_backend_mysql` | MySQL 8.4 via mysql-otp. The driver is synchronous, so writes are handed to a short-lived spawned process and the ack is messaged back — the backend still satisfies the behaviour's `{async, State}` contract |
 | `influxdb` | `db_backend_influxdb`, `db_read_backend_influxdb` | InfluxDB 2.7 over its HTTP API via `httpc`, no driver dependency. Writes are line protocol posted asynchronously, so the ack reaches the worker's mailbox and the behaviour's `{async, State}` contract is satisfied without a helper process |
 | `sqlite` | `db_backend_sqlite`, `db_read_backend_sqlite`, `db_backend_sqlite_lock` | SQLite embedded through the esqlite NIF, so there is no database container. An esqlite handle cannot be shared between processes, so writes run inline in the pool worker and return the behaviour's `{sync, ...}` form, each holding one node-wide write lock |
+| `mongodb` | `db_backend_mongodb`, `db_read_backend_mongodb` | MongoDB 8.0 via mongodb-erlang's `mc_worker_api`. The driver's calls block, so writes are handed to a short-lived spawned process and the ack is messaged back, as with `mysql`. Every write waits for the journal (`j: true`), and a batch is one `insert` command |
 
 Each SQL value needs its own `<backend>/init/init.sql`, written in that database's own dialect, so
 the schemas are equivalent rather than identical. `influxdb` has none: it is schema-on-write, the
@@ -221,7 +222,9 @@ image creates the bucket, and what the columns are is decided by the backend's l
 builders. So no file pins the schema across the two arms, and a missing `precision=us` on the write
 URL fails silently by landing every point in 1970. `sqlite` has no server to run a schema, so
 `sqlite/init/` holds `init.sql` plus a `connection.sql` for the settings SQLite keeps per connection,
-and the subscriber applies both every time it opens a connection.
+and the subscriber applies both every time it opens a connection. `mongodb` has
+`mongodb/init/init.js`, which the image runs to create a time-series `Data` collection and a
+`sensor_status` collection whose validator stands in for the SQL `CHECK`.
 
 Adding a backend is three things in this repo: the modules, their one-line registrations, and a
 `docker-compose.<backend>.yaml` fragment carrying that database's service, volume and connection
@@ -250,6 +253,15 @@ scenario files are backend-agnostic.
 > waiting for one, and no read crosses a network. The subscriber's CPU and memory include the database,
 > and there is no database container to start. 
 
+> **MongoDB stores readings in a time-series collection, and its drivers differ between the arms.**
+> The collection's time field is a BSON Date, so stored timestamps keep milliseconds, not
+> microseconds; the latency metrics are unaffected, since they come from the payload. Every write
+> waits for the journal, so `batching_off` builds a backlog at the swept load, and `batchsize_020`
+> and the higher-load `load_*` scenarios may as well. The read window scans every bucket, and buckets
+> accumulate as rows are written, so `reads_*` latency may grow with run length. This arm's driver
+> pipelines several writes on each connection while the Java driver sends one at a time, so this
+> backend's `pool_*` and `batching_off` numbers compare the drivers as much as the runtimes.
+
 ## 🧠 Deep Dive: Erlang Concurrency
 
 ### Lightweight Processes vs. OS Threads
@@ -277,7 +289,7 @@ The current implementation uses **GenServers** to encapsulate state and logic, m
 - **Messaging**: MQTT (Mosquitto/via emqtt)
 - **JSON**: Built-in json (OTP 27+)
 - **Observability**: Prometheus & Grafana
-- **Database**: Pluggable backends — TimescaleDB (default), MySQL, InfluxDB, SQLite (embedded)
+- **Database**: Pluggable backends — TimescaleDB (default), MySQL, InfluxDB, SQLite (embedded), MongoDB
 - **Deployment**: Docker & Docker Compose
 
 ## 📄 License

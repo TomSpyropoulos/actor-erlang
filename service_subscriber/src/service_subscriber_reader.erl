@@ -130,6 +130,7 @@ resolve_read_backend() ->
         "mysql"       -> db_read_backend_mysql;
         "influxdb"    -> db_read_backend_influxdb;
         "sqlite"      -> db_read_backend_sqlite;
+        "mongodb"     -> db_read_backend_mongodb;
         Unknown       -> error({unknown_db_backend, Unknown})
     end.
 

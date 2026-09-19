@@ -177,6 +177,7 @@ resolve_backend() ->
         "mysql"       -> db_backend_mysql;
         "influxdb"    -> db_backend_influxdb;
         "sqlite"      -> db_backend_sqlite;
+        "mongodb"     -> db_backend_mongodb;
         Unknown       -> error({unknown_db_backend, Unknown})
     end.
 

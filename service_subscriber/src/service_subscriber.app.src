@@ -11,6 +11,7 @@
         epgsql,
         mysql,
         esqlite,
+        mongodb,
         prometheus,
         prometheus_httpd
     ]},

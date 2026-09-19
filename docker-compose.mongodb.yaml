@@ -1,0 +1,54 @@
+# MongoDB fragment: everything specific to DB_BACKEND=mongodb. Loaded alongside docker-compose.yaml --
+# by bench.sh via an explicit second -f, and by the root .env's COMPOSE_FILE for hand-run
+# `docker compose` commands.
+services:
+  # MongoDB Community on stock server config with no tuning flags, so no database is given an
+  # advantage the others do not get. Durability is set per write by the clients instead; see
+  # finding W in audit.md.
+  mongodb:
+    image: mongo:8.0
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${DB_USER:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${DB_PASSWORD:-mongo}
+      MONGO_INITDB_DATABASE: ${DB_NAME:-epu}
+    volumes:
+      - mongodb-storage:/data/db
+      - ./mongodb/init/init.js:/docker-entrypoint-initdb.d/init.js:ro
+    healthcheck:
+      # The entrypoint runs init.js against a temporary server bound to 127.0.0.1 only, so a loopback
+      # probe would pass during initdb, the window the SQL fragments close by forcing TCP. Probing the
+      # container's own address reaches only the real server, and asserting that Data exists proves
+      # init.js ran, the way the influxdb probe lists its bucket.
+      test: ["CMD-SHELL", "mongosh --quiet --host \"$$(hostname -i)\" -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval 'quit(db.getSiblingDB(process.env.MONGO_INITDB_DATABASE).getCollectionNames().includes(\"Data\") ? 0 : 1)'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # The publisher never touches the database. It waits anyway so publishers do not start ahead of
+  # the rest of the stack, kept identical to the other fragments so the gate figures stay comparable.
+  publisher:
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  # Connection config for this backend: the same five keys the SQL fragments supply, read by
+  # db_backend_mongodb.erl in actor-erlang and DbConfig in actor-scala, so this file is byte-identical
+  # in the two repos. DB_USER authenticates against the admin database.
+  subscriber:
+    environment:
+      DB_HOST:     ${DB_HOST:-mongodb}
+      DB_PORT:     ${DB_PORT:-27017}
+      DB_NAME:     ${DB_NAME:-epu}
+      DB_USER:     ${DB_USER:-root}
+      DB_PASSWORD: ${DB_PASSWORD:-mongo}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+volumes:
+  mongodb-storage: {}
