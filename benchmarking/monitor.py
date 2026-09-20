@@ -6,6 +6,8 @@ stats and saves every raw sample to JSON for later analysis/plotting."""
 import argparse
 import json
 import math
+import subprocess
+import threading
 import time
 import urllib.request
 from collections import defaultdict
@@ -71,6 +73,12 @@ PANELS = [
     ("reads_per_second", "sum(rate(subscriber_reads_total[15s]))", None),
     ("sensors_alive", "sum(subscriber_sensor_up)", None),
     ("sensors_missing", "count(subscriber_sensor_up) - sum(subscriber_sensor_up)", None),
+    # Collection-only: raw cumulative totals, not rates, and no dashboard panel. The 15s rate window
+    # the two panels above use turns an abrupt stop into a 15s slide, so the second ingestion
+    # actually stopped or resumed is recoverable only from the counters themselves. An empty result
+    # here is itself the signal that the subscriber was unreachable at that sample.
+    ("requests_total", "sum(subscriber_requests_total)", None),
+    ("committed_total", "sum(subscriber_committed_total)", None),
 ]
 for _panel, _metric in LATENCY_STAGES:
     PANELS += [
@@ -91,7 +99,7 @@ for _panel, _metric in LATENCY_STAGES:
 # Cumulative-counter panels, excluded from aggregates: an avg/max over a monotonically growing
 # counter is meaningless. report.py reads these out of `samples` as window deltas instead.
 RAW_PANELS = {f"{panel}_{suffix}" for panel, _ in LATENCY_STAGES
-              for suffix in ("buckets", "sum", "count")}
+              for suffix in ("buckets", "sum", "count")} | {"requests_total", "committed_total"}
 
 
 def query_prometheus(base_url, promql):
@@ -138,6 +146,95 @@ def poll_loop(base_url, interval, started_at):
         except Exception as exc:  # transient network/query hiccups shouldn't abort a long run
             console.print(f"[yellow]warning:[/] metrics query failed: {exc}")
             continue
+
+
+def compose_command(compose_files, *args):
+    """Build a `docker compose` invocation. The -f flags are passed through from bench.sh rather
+    than left to the root .env, for the reason bench.sh states: --env-file replaces that file
+    instead of adding to it, so COMPOSE_FILE cannot be relied on here either."""
+    command = ["docker", "compose"]
+    for path in compose_files:
+        command += ["-f", str(path)]
+    return command + list(args)
+
+
+def collect_restart_counts(compose_files):
+    """Docker's own restart counter per container, read once after the run while the stack is still
+    up. Prometheus cannot supply this: cAdvisor's container_start_time_seconds reports one identical
+    value for every container here, and a process that restarts while its metrics are unreachable
+    leaves no sample to count in any case. An explicit stop/start does not increment this counter,
+    so everything it reports is a restart the container's own restart policy performed. Failures are
+    swallowed: a docker hiccup must not cost the run its samples."""
+    try:
+        listing = subprocess.run(compose_command(compose_files, "ps", "-aq"),
+                                 capture_output=True, text=True, timeout=30, check=False)
+        ids = listing.stdout.split()
+        if not ids:
+            return {}
+        inspected = subprocess.run(["docker", "inspect", "-f", "{{.Name}} {{.RestartCount}}", *ids],
+                                   capture_output=True, text=True, timeout=30, check=False)
+        counts = {}
+        for line in inspected.stdout.splitlines():
+            name, _, count = line.strip().partition(" ")
+            if count.isdigit() and int(count) > 0:
+                counts[name.lstrip("/")] = int(count)
+        return counts
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+
+class FaultInjector:
+    """Stops one dependency partway through a run and starts it again after `outage` seconds,
+    recording the instant each command was issued. Both commands run on a daemon thread: `docker
+    compose stop` waits out the container's SIGTERM grace period, and blocking the poll loop for
+    that long would blind the sampler over exactly the seconds the fault is meant to be measured
+    in. The issue time is what is recorded, since the command's own return says nothing about when
+    the dependency became unreachable."""
+
+    def __init__(self, compose_files, service, target, fault_at, outage, started_at):
+        self.compose_files = compose_files
+        self.service = service
+        self.target = target
+        self.fault_at = fault_at
+        self.outage = outage
+        self.started_at = started_at
+        self.events = []
+        self.restart_counts = {}
+
+    def tick(self, elapsed):
+        """Issue the stop, then the heal, as the run reaches each one's scheduled second."""
+        if not self.events and elapsed >= self.fault_at:
+            self._issue("stop")
+        elif len(self.events) == 1 and elapsed >= self.fault_at + self.outage:
+            self._issue("start")
+
+    def _issue(self, action):
+        now = datetime.now(timezone.utc)
+        self.events.append({
+            "action": action,
+            "service": self.service,
+            "timestamp": now.isoformat(),
+            "elapsed_seconds": round((now - self.started_at).total_seconds()),
+        })
+        console.print(f"[magenta]fault:[/] docker compose {action} {self.service}")
+        threading.Thread(
+            target=subprocess.run,
+            args=(compose_command(self.compose_files, action, self.service),),
+            kwargs={"check": False, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL},
+            daemon=True,
+        ).start()
+
+    def describe(self):
+        """The fault block stored in the run's JSON. Its presence is what marks a counter reset in
+        that run as the result being measured rather than a spoiled rep."""
+        return {
+            "target": self.target,
+            "service": self.service,
+            "fault_at_seconds": self.fault_at,
+            "outage_seconds": self.outage,
+            "events": self.events,
+            "restart_counts": self.restart_counts,
+        }
 
 
 def steady_state(samples, warmup_seconds):
@@ -259,7 +356,7 @@ def render_view(sample, started_at):
 
 def write_output(output_dir, scenario_name, started_at, interval, samples, aggregates, rep=None,
                  warmup_seconds=0, gate_startup_seconds=None, gate_ingest_seconds=None,
-                 counter_reset=False):
+                 gate_commit_seconds=None, counter_reset=False, fault=None):
     """Serialize the run's raw samples and aggregates to a timestamped JSON file under output_dir.
     When rep is given (a repetition index), tag the filename and payload so the post-run report
     can group the reps of one scenario; without it the original single-run naming is preserved.
@@ -268,7 +365,10 @@ def write_output(output_dir, scenario_name, started_at, interval, samples, aggre
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = Path(scenario_name).stem
     rep_tag = f"_rep{rep}" if rep is not None else ""
-    path = output_dir / f"{stem}{rep_tag}_{started_at.strftime('%Y%m%d-%H%M%S')}.json"
+    # A fault run's name carries which dependency was stopped and for how long: the scenario stem
+    # alone collides across cells that differ in nothing else.
+    fault_tag = f"_{fault['target']}_{fault['outage_seconds']}s" if fault else ""
+    path = output_dir / f"{stem}{fault_tag}{rep_tag}_{started_at.strftime('%Y%m%d-%H%M%S')}.json"
     payload = {
         "scenario": scenario_name,
         "rep": rep,
@@ -277,7 +377,9 @@ def write_output(output_dir, scenario_name, started_at, interval, samples, aggre
         "warmup_seconds": warmup_seconds,
         "gate_startup_seconds": gate_startup_seconds,
         "gate_ingest_seconds": gate_ingest_seconds,
+        "gate_commit_seconds": gate_commit_seconds,
         "counter_reset": counter_reset,
+        "fault": fault,
         "samples": samples,
         "aggregates": aggregates,
     }
@@ -314,10 +416,29 @@ def main():
                         help="Seconds bench.sh waited for the metrics endpoint, recorded as startup cost")
     parser.add_argument("--gate-ingest-seconds", type=int, default=None,
                         help="Seconds bench.sh waited for ingestion to begin, recorded as startup cost")
+    parser.add_argument("--gate-commit-seconds", type=int, default=None,
+                        help="Further seconds bench.sh waited for the first DB commit, recorded as startup cost")
+    parser.add_argument("--fault-target", default=None,
+                        help="Which dependency to stop mid-run, as bench.sh names it (db or broker)")
+    parser.add_argument("--fault-service", default=None,
+                        help="Compose service the target resolves to, e.g. mosquitto or timescaledb")
+    parser.add_argument("--fault-at", type=int, default=60,
+                        help="Elapsed seconds at which the target is stopped (default: 60)")
+    parser.add_argument("--outage", type=int, default=30,
+                        help="Seconds the target stays stopped before it is started again (default: 30)")
+    parser.add_argument("--compose-file", action="append", default=[], dest="compose_files",
+                        help="Compose file passed through to the fault's docker compose call; repeatable")
     args = parser.parse_args()
 
     started_at = datetime.now(timezone.utc)
     samples = []
+
+    injector = None
+    if args.fault_service:
+        injector = FaultInjector(args.compose_files, args.fault_service, args.fault_target,
+                                 args.fault_at, args.outage, started_at)
+        console.print(f"Fault scheduled: stop [bold]{args.fault_service}[/] at {args.fault_at}s "
+                      f"for {args.outage}s.")
 
     if args.duration is not None:
         console.print(f"Polling {args.prometheus_url} every {args.interval}s for {args.duration}s "
@@ -330,6 +451,8 @@ def main():
         with Live(render_view(None, started_at), refresh_per_second=4, console=console) as live:
             for sample in poll_loop(args.prometheus_url, args.interval, started_at):
                 samples.append(sample)
+                if injector is not None:
+                    injector.tick(sample["elapsed_seconds"])
                 live.update(render_view(sample, started_at))
                 if args.duration is not None and sample["elapsed_seconds"] >= args.duration:
                     break
@@ -345,16 +468,23 @@ def main():
             console.print(f"[yellow]warning:[/] no samples past the {args.warmup}s warm-up; "
                           "aggregating the whole run instead")
             measured = samples
+        # Read while the stack is still up: bench.sh tears it down once this process exits.
+        if injector is not None:
+            injector.restart_counts = collect_restart_counts(args.compose_files)
         counter_reset = detect_counter_reset(samples)
-        if counter_reset:
+        if counter_reset and injector is None:
             console.print("[red]warning:[/] observation counters went backwards — the subscriber "
                           "restarted mid-run; this rep will be excluded from the report")
+        elif counter_reset:
+            console.print("[yellow]note:[/] observation counters went backwards — the subscriber "
+                          "restarted, which is the fault's result and not a spoiled rep")
         aggregates = compute_aggregates(measured)
         console.print()
         print_summary(aggregates)
         path = write_output(args.output_dir, args.scenario_name, started_at, args.interval, samples,
                             aggregates, args.rep, args.warmup, args.gate_startup_seconds,
-                            args.gate_ingest_seconds, counter_reset)
+                            args.gate_ingest_seconds, args.gate_commit_seconds, counter_reset,
+                            injector.describe() if injector else None)
         console.print(f"\nSaved {len(samples)} samples ({len(measured)} steady-state) to [bold]{path}[/]")
 
 

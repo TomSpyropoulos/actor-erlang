@@ -21,11 +21,9 @@ fi
 # would be lost and the stack would come up with no database and no error.
 COMPOSE=(docker compose -f "$REPO/docker-compose.yaml" -f "$DB_COMPOSE")
 
-# Per-backend, so a second database's sweep cannot overwrite the first's runs or its report.
-OUTPUT_DIR="$BENCH_DIR/output/$DB_BACKEND"
-
 # How long a rep can take to become measurable before it is abandoned. Startup covers image start
-# plus the database's initdb. Ingestion covers broker connect and the first messages arriving.
+# plus the database's initdb. Ingestion covers broker connect and the first messages arriving, and
+# the wait for the first commit after it gets the same budget again.
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-180}"
 INGEST_TIMEOUT="${INGEST_TIMEOUT:-60}"
 # Startup transient excluded from every reported figure. Must be at least the 15s rate window used
@@ -33,7 +31,53 @@ INGEST_TIMEOUT="${INGEST_TIMEOUT:-60}"
 WARMUP_SECONDS="${WARMUP_SECONDS:-30}"
 SKIPPED_REPS=0
 
-MODE="${1:?Usage: $0 <scenario-file>|all}"
+MODE="${1:?Usage: $0 <scenario-file>|all [--fault db|broker] [--outage <seconds>]}"
+shift
+
+# Fault injection: stop one dependency partway through a run and start it again, to measure what
+# each runtime does while something it depends on is gone. Off unless --fault is passed.
+FAULT_TARGET=""
+FAULT_OUTAGE="${FAULT_OUTAGE:-30}"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --fault)  FAULT_TARGET="${2:?--fault needs a target: db or broker}"; shift 2 ;;
+        --outage) FAULT_OUTAGE="${2:?--outage needs a number of seconds}"; shift 2 ;;
+        *) echo "unknown argument: $1" >&2
+           echo "Usage: $0 <scenario-file>|all [--fault db|broker] [--outage <seconds>]" >&2
+           exit 1 ;;
+    esac
+done
+
+if [[ -n "$FAULT_TARGET" ]]; then
+    # A sweep injects nothing: 30 scenarios x 3 reps would measure one dependency failure 90 times.
+    [[ "$MODE" == all ]] && { echo "--fault takes a single scenario, not the full sweep" >&2; exit 1; }
+    # `db` and `broker` rather than a service name, so a fault run stays backend-agnostic exactly as
+    # the scenario files are: which service the database is depends on the fragment DB_BACKEND picked.
+    case "$FAULT_TARGET" in
+        broker) FAULT_SERVICE=mosquitto ;;
+        db)     FAULT_SERVICE="$DB_BACKEND" ;;
+        *) echo "unknown --fault target '$FAULT_TARGET': expected db or broker" >&2; exit 1 ;;
+    esac
+    # An embedded database has no container to stop. Ask compose which services the loaded fragments
+    # actually declare rather than hard-coding which backends those are.
+    if ! "${COMPOSE[@]}" config --services 2>/dev/null | grep -qx "$FAULT_SERVICE"; then
+        echo "DB_BACKEND=$DB_BACKEND declares no '$FAULT_SERVICE' service, so there is nothing to stop" >&2
+        exit 1
+    fi
+    # The three phases of a fault run: baseline, outage, recovery. The baseline has to clear the
+    # warm-up trim, or the reference the outage is read against is the startup ramp and not steady
+    # state. Prometheus scrapes every 2s, so a finer sample interval would resolve nothing more.
+    FAULT_AT="${FAULT_AT:-60}"
+    FAULT_RECOVERY="${FAULT_RECOVERY:-75}"
+    : "${RUN_DURATION:=$((FAULT_AT + FAULT_OUTAGE + FAULT_RECOVERY))}"; export RUN_DURATION
+    : "${METRICS_INTERVAL:=2}"; export METRICS_INTERVAL
+fi
+
+# Per-backend, so a second database's sweep cannot overwrite the first's runs or its report. A fault
+# run writes to its own tree: report.py's glob is not recursive and `all` clears only its own
+# directory, so a fault run can neither be averaged into a sweep cell nor deleted by one.
+OUTPUT_DIR="$BENCH_DIR/output/$DB_BACKEND"
+[[ -n "$FAULT_TARGET" ]] && OUTPUT_DIR="$BENCH_DIR/output/faults/$DB_BACKEND"
 
 # Create the monitor's venv and install its dependencies on first run only.
 ensure_venv() {
@@ -61,8 +105,15 @@ subscriber_requests() {
         | awk '/^subscriber_requests_total /{v=$2; found=1} END{print (found ? v : 0)}'
 }
 
-# Run a single scenario end-to-end: bring the stack up, wait until it is actually ingesting,
-# then hand off to monitor.py. Returns non-zero if the stack never became measurable. Runs in a subshell so the scenario's
+# Current value of the subscriber's commit counter, which only advances on a real DB ack. Same
+# int-vs-float caveat as subscriber_requests, so callers compare these with awk too.
+subscriber_committed() {
+    curl -s http://localhost:8081/metrics 2>/dev/null \
+        | awk '/^subscriber_committed_total /{v=$2; found=1} END{print (found ? v : 0)}'
+}
+
+# Run a single scenario end-to-end: bring the stack up, wait until it is actually ingesting and
+# committing, then hand off to monitor.py. Returns non-zero if the stack never became measurable. Runs in a subshell so the scenario's
 # sourced variables do not leak into the next iteration (which would let a stale value
 # like PAYLOAD_PADDING_BYTES override the next scenario's compose interpolation).
 # Args: <scenario-file> <build|nobuild> <rep>
@@ -80,11 +131,21 @@ run_one() (
     local duration_arg=()
     [[ -n "${RUN_DURATION:-}" ]] && duration_arg=(--duration "$RUN_DURATION")
 
+    # monitor.py injects the fault itself, so the stop and the heal are timestamped on the same
+    # clock as the samples around them. The compose files are passed explicitly for the same reason
+    # they are passed above: --env-file replaces the root .env rather than adding to it.
+    local fault_arg=()
+    [[ -n "$FAULT_TARGET" ]] && fault_arg=(
+        --fault-target "$FAULT_TARGET" --fault-service "$FAULT_SERVICE"
+        --fault-at "$FAULT_AT" --outage "$FAULT_OUTAGE"
+        --compose-file "$REPO/docker-compose.yaml" --compose-file "$DB_COMPOSE")
+
     echo "=== Benchmark: $(basename "$scenario") ==="
     echo "  Publishers  : $pub  (~$((pub * 1000)) msg/s)"
     echo "  Batch       : ${BATCH_ENABLED:-false}  (size=${BATCH_SIZE:-100}, timeout=${BATCH_TIMEOUT_MS:-1000}ms)"
     echo "  DB pool     : ${DB_POOL_SIZE:-20} workers"
     echo "  Backend     : $DB_BACKEND"
+    [[ -n "$FAULT_TARGET" ]] && echo "  Fault       : stop $FAULT_SERVICE at ${FAULT_AT}s for ${FAULT_OUTAGE}s"
     [[ -n "${RUN_DURATION:-}" ]] && echo "  Duration    : ${RUN_DURATION}s (interval ${interval}s, warm-up ${WARMUP_SECONDS}s)"
     echo ""
 
@@ -120,6 +181,23 @@ run_one() (
         fi
     done
 
+    # Ingesting is not the same as working: a subscriber holding a dead database connection reads
+    # from the broker at full rate and commits nothing, which the gate above cannot tell apart from
+    # a healthy stack. Require one real DB ack before measuring, so such a rep is skipped rather
+    # than reported as a run whose committed throughput happens to be zero. Recorded separately
+    # from the ingest wait, since redefining that would change what archived runs' figures mean.
+    echo "Waiting for the first commit..."
+    local before_commit after_commit commit_waited=0
+    before_commit=$(subscriber_committed)
+    until after_commit=$(subscriber_committed); awk -v a="$before_commit" -v b="$after_commit" 'BEGIN{exit !(b > a)}'; do
+        sleep 1; commit_waited=$((commit_waited + 1))
+        if [[ $commit_waited -ge $INGEST_TIMEOUT ]]; then
+            echo "ERROR: subscriber is ingesting but committed nothing in ${INGEST_TIMEOUT}s (counter stuck at ${after_commit})" >&2
+            "${COMPOSE[@]}" logs --tail 40 subscriber >&2 || true
+            return 1
+        fi
+    done
+
     ensure_venv
 
     echo "Ready. Launching metrics view..."
@@ -138,7 +216,8 @@ run_one() (
         --warmup "$WARMUP_SECONDS" \
         --gate-startup-seconds "$waited" \
         --gate-ingest-seconds "$ingest_waited" \
-        "${duration_arg[@]}" || true
+        --gate-commit-seconds "$commit_waited" \
+        "${duration_arg[@]}" "${fault_arg[@]}" || true
 )
 
 # Run one scenario REPS times, tearing the stack down between reps so each starts cold and
@@ -202,4 +281,11 @@ else
     # REPS defaults to 1. Set it (with RUN_DURATION) to repeat an unattended single scenario.
     [[ -f "$MODE" ]] || { echo "scenario file not found: $MODE" >&2; exit 1; }
     run_reps "$MODE" build
+
+    # A fault run is self-contained, so its report is built here rather than only after a sweep.
+    if [[ -n "$FAULT_TARGET" && -x "$VENV_DIR/bin/python" ]]; then
+        echo ""
+        echo "Generating fault report..."
+        "$VENV_DIR/bin/python" "$BENCH_DIR/fault_report.py" --output-dir "$OUTPUT_DIR" || true
+    fi
 fi

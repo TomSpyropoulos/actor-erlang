@@ -331,6 +331,7 @@ def summarize_startup(runs):
     return {
         "gate_startup_s": mean_of("gate_startup_seconds"),
         "gate_ingest_s": mean_of("gate_ingest_seconds"),
+        "gate_commit_s": mean_of("gate_commit_seconds"),
         "ttss_s": statistics.mean(ttss) if ttss else None,
         # A rep that had not settled by the trim boundary contaminated its own steady-state window.
         "ttss_over_warmup": over,
@@ -380,6 +381,16 @@ def write_csv(path, rows):
             writer.writerow(record)
 
 
+# The source directory as the READMEs write it, relative to the repo root. bench.sh passes an
+# absolute --output-dir, and printing that verbatim bakes one machine's home directory into a file
+# meant to be read, and committed, somewhere else. A directory outside the repo is printed as given.
+def source_label(output_dir):
+    try:
+        return output_dir.resolve().relative_to(Path(__file__).resolve().parent.parent)
+    except ValueError:
+        return output_dir
+
+
 # Write the Markdown report: one headline table per OFAT group, then the startup table, then a
 # provenance block recording every parameter needed to reproduce or re-slice the numbers.
 def write_markdown(path, rows, output_dir, run_count, provenance):
@@ -390,7 +401,7 @@ def write_markdown(path, rows, output_dir, run_count, provenance):
     lines = [
         "# Benchmark report",
         "",
-        f"Source: `{output_dir}` — {run_count} runs across {len(rows)} scenarios.",
+        f"Source: `{source_label(output_dir)}` — {run_count} runs across {len(rows)} scenarios.",
         "",
         "Latencies in ms, `msgs_s` (ingested) and `committed_s` (DB-committed) in msg/s, "
         "`cpu_cores` in cores, `mem_mb` in MB.",
@@ -424,19 +435,22 @@ def write_markdown(path, rows, output_dir, run_count, provenance):
         "## Startup",
         "",
         "`gate_startup_s` is the wait for the subscriber's metrics endpoint, `gate_ingest_s` the "
-        "further wait until the first message was ingested — together, the cost of getting the "
+        "further wait until the first message was ingested, and `gate_commit_s` the further wait "
+        "until the first row was acknowledged by the database — together, the cost of getting the "
         "runtime to the point where it is measurable at all. `ttss_s` is seconds from first "
-        "message until throughput settles within 5% of its steady mean.",
+        "message until throughput settles within 5% of its steady mean. `gate_commit_s` is blank "
+        "for runs collected before that gate existed.",
         "",
-        "| scenario | gate_startup_s | gate_ingest_s | ttss_s | reps over warm-up | warmup_e2e_p99 |",
-        "|---|---|---|---|---|---|",
+        "| scenario | gate_startup_s | gate_ingest_s | gate_commit_s | ttss_s | reps over warm-up | warmup_e2e_p99 |",
+        "|---|---|---|---|---|---|---|",
     ]
     for row in sorted(rows, key=lambda r: r["scenario"]):
         s = row["startup"]
         def num(v):
             return "-" if v is None else f"{v:.1f}"
         lines.append(f"| {row['scenario']} | {num(s['gate_startup_s'])} | {num(s['gate_ingest_s'])} "
-                     f"| {num(s['ttss_s'])} | {s['ttss_over_warmup']} | {num(s['warmup_e2e_p99'])} |")
+                     f"| {num(s['gate_commit_s'])} | {num(s['ttss_s'])} | {s['ttss_over_warmup']} "
+                     f"| {num(s['warmup_e2e_p99'])} |")
     lines.append("")
 
     lines += [

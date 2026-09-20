@@ -68,14 +68,17 @@ do not have to recompile.
 `bench.sh` runs one benchmark. It takes a scenario file and reads it as environment variables. It
 then starts the Docker Compose stack with the configured number of publisher instances.
 
-`bench.sh` next waits until the stack really ingests messages. It first waits for the Prometheus
-endpoint of the subscriber to answer. It then waits for `subscriber_requests_total` to advance.
-The second check matters because the metrics server binds before the subscriber reaches the
-broker or the database. A subscriber that died during startup still serves a scrapeable
-`/metrics` with every counter at zero.
+`bench.sh` next waits until the stack really works. It first waits for the Prometheus endpoint of
+the subscriber to answer. It then waits for `subscriber_requests_total` to advance. It then waits
+for `subscriber_committed_total` to advance as well. The second check matters because the metrics
+server binds before the subscriber reaches the broker or the database. A subscriber that died
+during startup still serves a scrapeable `/metrics` with every counter at zero. The third check
+matters because ingesting is not the same as working: a subscriber holding a dead database
+connection reads from the broker at full rate and commits nothing, which the second check cannot
+tell apart from a healthy stack.
 
-A rep is one measured run of one scenario. If a rep does not start to ingest within
-`INGEST_TIMEOUT` seconds (default `60`), `bench.sh` skips it. It dumps the container logs, writes
+A rep is one measured run of one scenario. If a rep does not start to ingest, or does not commit
+its first row, within `INGEST_TIMEOUT` seconds each (default `60`), `bench.sh` skips it. It dumps the container logs, writes
 no JSON file, and moves on, so a dead run can never enter a report cell. `bench.sh all` reports
 the number of skipped reps in its closing summary.
 
@@ -149,6 +152,47 @@ so every rep starts cold.
 difference between the runtimes. Each rep writes a JSON file tagged `..._repN_...json`. You can
 set `REPS` on a single scenario too, together with `RUN_DURATION`, to repeat it unattended.
 
+### Fault runs
+
+A normal run measures a healthy pipeline. A fault run measures what the pipeline does when
+something it depends on goes away. `bench.sh` stops one dependency partway through the run, holds
+it down, and starts it again, while the monitor keeps sampling throughout.
+
+```bash
+./bench.sh benchmarking/scenarios/load_p20.env --fault db --outage 30
+./bench.sh benchmarking/scenarios/load_p20.env --fault broker --outage 30
+```
+
+`--fault broker` stops Mosquitto. `--fault db` stops whichever database `DB_BACKEND` selected, so
+the same command covers every backend that runs in its own container. SQLite is a library inside
+the subscriber and has no container, so `bench.sh` refuses that combination and says why. `--fault`
+takes a single scenario and not `all`, because a sweep would measure one dependency failure ninety
+times.
+
+A fault run has three phases. The baseline runs until `FAULT_AT` seconds (default `60`), which is
+past the warm-up trim, so the outage is read against steady state rather than against the startup
+ramp. The outage then lasts `--outage` seconds (default `30`). The recovery window runs for
+`FAULT_RECOVERY` seconds (default `75`). `RUN_DURATION` is the sum of the three, so you do not
+normally set it yourself. The sample interval drops to 2s, which is how often Prometheus scrapes,
+because anything coarser blurs the edge the run exists to measure.
+
+`monitor.py` issues the stop and the start itself, rather than `bench.sh` doing it, so both land on
+the same clock as the samples around them. It records the moment each command was issued in the
+run's JSON. `monitor.py` also collects the two ingest counters as raw cumulative totals and not
+only as rates: the rate panels use a 15s window, which turns an abrupt stop into a slide over
+fifteen seconds, while the raw counters keep the exact second.
+
+If the subscriber restarts mid-run, its counters restart from zero. On an ordinary run that
+invalidates the rep and `report.py` drops it. On a fault run it is one of the things being
+measured, so the run is kept and the report names it.
+
+Fault runs write to `benchmarking/output/faults/<backend>/`, a separate tree from an ordinary
+sweep. `report.py` does not read it and `bench.sh all` does not clear it, so a fault run can never
+be averaged into a sweep cell and a sweep can never delete one. When the reps finish, `bench.sh`
+runs `benchmarking/fault_report.py` over that directory. It writes `fault_report.md`, holding one
+summary row per run plus each run's events and phase breakdown, and `fault_report.csv`, holding one
+row per sample for plotting.
+
 ### Post-run report
 
 After a full `bench.sh all` sweep, `benchmarking/report.py` aggregates every per-rep JSON file.
@@ -175,9 +219,10 @@ observed. Three reps with p99 values of 10 ms, 10 ms and 300 ms average to 107 m
 same 3000 observations is 300 ms. The per-rep spread is what shows you that the reps were not
 interchangeable.
 
-The startup table carries one row per scenario. The row gives four figures. The first two are how long
-the stack took to serve metrics and how long it then took to ingest its first message. The other
-two are the measured time to steady state and the warm-up p99. Those figures turn the startup
+The startup table carries one row per scenario. The row gives five figures. The first three are how
+long the stack took to serve metrics, how long it then took to ingest its first message, and how
+long it then took to commit its first row. The other two are the measured time to steady state and
+the warm-up p99. The third figure is blank for runs collected before that wait existed. Those figures turn the startup
 transient from a contaminant into a measurement of its own. They compare the ramp of the JVM
 against the flat start of the BEAM.
 
@@ -324,6 +369,9 @@ against `batching_on.env`, and the second is identical to the anchor.
 | `INGEST_TIMEOUT` | `60` | Seconds a rep can take to start ingesting, once its endpoint answers, before `bench.sh` skips it |
 | `REPS` | `1` | Times `bench.sh` repeats each scenario, with a full teardown between reps (`bench.sh all` defaults it to `3`). The report collapses the reps to a mean and a standard deviation, and pools their histogram buckets for latency |
 | `METRICS_INTERVAL` | `5` / `10` | Seconds between metric snapshots (`5` in duration mode, `10` interactive) |
+| `FAULT_AT` | `60` | Elapsed seconds at which `--fault` stops its target. It must clear `WARMUP_SECONDS`, or the outage is compared against the startup ramp |
+| `FAULT_OUTAGE` | `30` | Seconds the target stays stopped. `--outage` sets the same thing on the command line |
+| `FAULT_RECOVERY` | `75` | Seconds the run keeps sampling after the target is started again |
 
 ### Supported `DB_BACKEND` values
 
