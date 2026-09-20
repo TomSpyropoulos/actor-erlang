@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS Data (
     -- DATETIME(6), never bare DATETIME: bare defaults to second precision and would silently
     -- truncate the microseconds the wire format carries, which every e2e latency depends on.
     Timestamp DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    -- TimescaleDB gets time-based chunk exclusion from create_hypertable; InnoDB has no equivalent.
+    -- TimescaleDB gets time-based chunk exclusion from create_hypertable. InnoDB has no equivalent.
     -- Without this index the read group's bounded-window query degrades to a full scan of a table
     -- that grows all run, so read latency would drift upward with elapsed time -- exactly what the
     -- bounded window in db_read_backend_mysql.erl was written to prevent.

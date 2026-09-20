@@ -4,7 +4,7 @@
 %% mysql:execute/3 blocks, which is what read/1's contract wants, so the spawned-helper indirection
 %% db_backend_mysql needs on the write path is deliberately absent here.
 %%
-%% Reads the five DB_* connection variables; their defaults live in docker-compose.mysql.yaml.
+%% Reads the five DB_* connection variables. Their defaults live in docker-compose.mysql.yaml.
 -module(db_read_backend_mysql).
 -behaviour(db_read_backend).
 
@@ -22,13 +22,11 @@
 %% collide and nothing here creates atoms at runtime.
 -define(READ_STMT, read_data).
 
-%% The MySQL spelling of the read group's query; see the read-group section of audit.md for why the
-%% window is bounded. The bound is only cheap because mysql/init/init.sql indexes Timestamp -- InnoDB
-%% has no equivalent of TimescaleDB's chunk exclusion. NOW(6), not NOW(), to match the microsecond
-%% resolution of the Postgres now().
-%%
-%% Byte-identical to MySQLReadTarget.scala, or the group compares query plans instead of runtimes.
-%% The rule is per backend: this pair must match each other, not the TimescaleDB pair.
+%% The MySQL spelling of the read group's query: the same bounded window. The bound is only cheap
+%% because mysql/init/init.sql indexes Timestamp, since InnoDB has no equivalent of TimescaleDB's
+%% chunk exclusion. NOW(6), not NOW(), to match the microsecond resolution of the Postgres now().
+%% Byte-identical to MySQLReadTarget.scala, or the group compares query plans instead of runtimes,
+%% and the rule is per backend: this pair must match each other, not the TimescaleDB pair.
 -define(READ_SQL,
         "SELECT avg(Value), count(*) FROM Data WHERE Timestamp > NOW(6) - INTERVAL 5 SECOND").
 

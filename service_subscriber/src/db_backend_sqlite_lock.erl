@@ -1,10 +1,9 @@
 %% @doc The SQLite write lock: one per node, shared by every db_backend_sqlite pool worker. SQLite
 %% allows one writer, so a worker takes this before BEGIN rather than waiting for the file lock in
-%% SQLite's busy handler, which holds a dirty IO scheduler while it sleeps. Enough sleeping writers
-%% starved the lock holder of a scheduler and deadlocked the pool; see finding R in audit.md.
-%%
-%% Callers queue in arrival order. A holder that dies releases the lock through its monitor.
-%% Mirrors SQLiteBackend.withWriteLock.
+%% SQLite's busy handler, which holds a dirty IO scheduler while it sleeps. Without it, enough
+%% sleeping writers starve the lock holder of a scheduler and the pool deadlocks at a large
+%% DB_POOL_SIZE. Callers queue in arrival order, and a holder that dies releases the lock through
+%% its monitor. Mirrors SQLiteBackend.withWriteLock.
 -module(db_backend_sqlite_lock).
 -behaviour(gen_server).
 
@@ -40,7 +39,7 @@ release() ->
 init([]) ->
     {ok, #lock{holder = undefined, waiting = queue:new()}}.
 
-%% Grants the lock at once when free and queues the caller otherwise. Only the holder may release.
+%% Grants the lock at once when free and queues the caller otherwise. Only the holder can release.
 handle_call(acquire, {Pid, _} = From, #lock{holder = undefined} = L) ->
     gen_server:reply(From, ok),
     {noreply, L#lock{holder = {Pid, monitor(process, Pid)}}};
@@ -52,7 +51,7 @@ handle_call(release, {Pid, _}, #lock{holder = {Pid, Ref}} = L) ->
 handle_call(release, _From, L) ->
     {reply, {error, not_holder}, L}.
 
-%% No casts are used; satisfy the callback contract.
+%% No casts are used. Satisfy the callback contract.
 handle_cast(_Msg, L) ->
     {noreply, L}.
 

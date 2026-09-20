@@ -4,7 +4,7 @@
 %% The aggregate goes out as one raw OP_MSG command, whose reply carries the whole result in its first
 %% batch. mc_worker_api:command/2 would start a cursor process per read for a single document.
 %%
-%% Reads the five DB_* connection variables through db_backend_mongodb; their defaults live in
+%% Reads the five DB_* connection variables through db_backend_mongodb. Their defaults live in
 %% docker-compose.mongodb.yaml.
 -module(db_read_backend_mongodb).
 -behaviour(db_read_backend).
@@ -23,8 +23,8 @@
 }).
 
 %% The MongoDB spelling of the read group's query, as JSON text so the two arms can hold the same
-%% bytes. $$NOW keeps the window server-side like NOW(6); finding Y covers how it prunes buckets.
-%% Byte-identical to MongoReadTarget.scala; the matching rule is per backend.
+%% bytes. $$NOW keeps the window server-side like NOW(6). Byte-identical to MongoReadTarget.scala,
+%% and the matching rule is per backend.
 -define(READ_PIPELINE,
         <<"[{\"$match\":{\"$expr\":{\"$gt\":[\"$Timestamp\",{\"$subtract\":[\"$$NOW\",5000]}]}}},"
           "{\"$group\":{\"_id\":null,\"avg\":{\"$avg\":\"$Value\"},\"count\":{\"$sum\":1}}}]">>).

@@ -4,7 +4,7 @@
 %% Synchronous epgsql, not epgsqla as every write is: there is no ack to correlate, and read/1's
 %% contract is blocking.
 %%
-%% Reads the five DB_* connection variables; their defaults live in docker-compose.timescaledb.yaml.
+%% Reads the five DB_* connection variables. Their defaults live in docker-compose.timescaledb.yaml.
 -module(db_read_backend_timescaledb).
 -behaviour(db_read_backend).
 
@@ -21,10 +21,9 @@
     read_stmt :: #statement{}
 }).
 
-%% The read group's query; see the read-group section of audit.md for why the window is bounded and
-%% carries no device filter. Byte-identical to TimescaleReadTarget.scala, or the group compares query
-%% plans instead of runtimes. The rule is per backend: db_read_backend_mysql and MySQLReadTarget.scala
-%% must match each other, not this pair.
+%% The read group's query: a bounded window, no device filter. Byte-identical to
+%% TimescaleReadTarget.scala, or the group compares query plans instead of runtimes. The rule is per
+%% backend: db_read_backend_mysql and MySQLReadTarget.scala must match each other, not this pair.
 -define(READ_SQL,
         "SELECT avg(Value), count(*) FROM Data WHERE Timestamp > now() - interval '5 seconds'").
 

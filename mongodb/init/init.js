@@ -3,7 +3,7 @@
 
 // A time-series collection: MongoDB's own layout for this workload, bucketing readings per device
 // the way a hypertable chunks them. timeField must be a BSON Date, which holds milliseconds, so the
-// stored Timestamp loses the payload's microseconds; see finding V in audit.md.
+// stored Timestamp loses the payload's microseconds.
 db.createCollection("Data", {
   timeseries: { timeField: "Timestamp", metaField: "DeviceName", granularity: "seconds" }
 });

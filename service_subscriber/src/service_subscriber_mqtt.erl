@@ -11,7 +11,7 @@
 
 %% How often every worker is pinged to re-evaluate its sensor's liveness.
 %% Coupled with ?LIVENESS_TIMEOUT_S (1s) in service_subscriber_worker, which sets how
-%% long a sensor may be silent before this check flips it to MISSING — keep the two in sync.
+%% long a sensor can be silent before this check flips it to MISSING. Keep the two in sync.
 -define(HEARTBEAT_INTERVAL_MS, 5000).
 
 %% State of the subscriber MQTT handler.
@@ -43,18 +43,18 @@ init([]) ->
         conn_opts = [{host, "mosquitto"}, {port, 1883}, {clientid, <<"erlang_subscriber">>}]
     }}.
 
-%% No casts used; satisfy the callback contract.
+%% No casts used. Satisfy the callback contract.
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% No synchronous calls used; satisfy the callback contract.
+%% No synchronous calls used. Satisfy the callback contract.
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
 %% Establishes the emqtt connection and subscribes to the sensors wildcard topic.
 handle_info(connect_mqtt, #state{conn_opts = Opts} = State) ->
     {ok, Pid} = emqtt:start_link(Opts),
-    %% emqtt:connect/1 may block; catch avoids crashing the gen_server on transient errors.
+    %% emqtt:connect/1 can block. Catch avoids crashing the gen_server on transient errors.
     _ = (catch emqtt:connect(Pid)),
     Topic = <<"sensors/#">>,
 
@@ -98,8 +98,8 @@ terminate(_Reason, #state{conn_pid = MqttPid}) ->
 spawn_or_forward(Topic, Payload, State) ->
     case ets:lookup(service_subscriber_workers, Topic) of
         [{Topic, Pid}] ->
-            %% Worker is known — cast directly. No is_process_alive check needed;
-            %% if the worker is dead we'll receive a 'DOWN' message and clean up ETS.
+            %% Worker is known, so cast directly. No is_process_alive check is needed: if the
+            %% worker is dead, a 'DOWN' message arrives and cleans up ETS.
             gen_server:cast(Pid, Payload),
             {noreply, State};
         [] ->

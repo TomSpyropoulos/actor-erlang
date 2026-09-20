@@ -26,7 +26,7 @@ start_worker(Topic) ->
     },
     supervisor:start_child(?MODULE, ChildSpec).
 
-%% Initialises the supervisor with an empty child list; workers are added at runtime.
+%% Initialises the supervisor with an empty child list. Workers are added at runtime.
 init([]) ->
     SupFlags = #{
         strategy  => one_for_one,

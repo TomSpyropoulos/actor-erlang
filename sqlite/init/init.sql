@@ -2,8 +2,8 @@
 -- column names match them. No server runs this file: every subscriber connection runs it on open,
 -- after connection.sql, so each statement must be idempotent.
 --
--- Both arms drop whole-line `--` comments and split the rest on semicolons, so no statement may
--- contain one and no comment may share a line with SQL.
+-- Both arms drop whole-line `--` comments and split the rest on semicolons, so no statement
+-- contains one and no comment shares a line with SQL.
 
 -- Stored in the file, so it holds for every later connection. WAL is what lets readers run alongside
 -- the single writer.
@@ -11,7 +11,7 @@ PRAGMA journal_mode = WAL;
 
 -- STRICT, so a value bound with the wrong type fails instead of being stored as whatever arrived.
 -- Timestamp is epoch microseconds, the unit the backend contract already carries. Nothing in the
--- column enforces that unit; see finding U in audit.md.
+-- column enforces that unit.
 CREATE TABLE IF NOT EXISTS Data (
     DeviceName TEXT NOT NULL,
     Value INTEGER NOT NULL,

@@ -1,12 +1,8 @@
 %% @doc TimescaleDB (PostgreSQL) backend implementing the db_backend behaviour. One instance per
 %% pool worker, statements parsed once at init/2. Buffering and the batch triggers belong to the
-%% dispatcher (service_subscriber_db); what lives here is how a write is executed and how its ack is
-%% correlated back to the rows it covered.
-%%
-%% Both write paths go out asynchronously via epgsqla. The ack arrives as a {Pid, Ref, Result}
-%% message that handle_result/2 claims by matching the worker's own db_pid.
-%%
-%% Reads the five DB_* connection variables; their defaults live in docker-compose.timescaledb.yaml.
+%% dispatcher (service_subscriber_db). Both write paths go out asynchronously via epgsqla, and the
+%% ack arrives as a {Pid, Ref, Result} message that handle_result/2 claims by matching the worker's
+%% own db_pid. Reads the five DB_* connection variables.
 -module(db_backend_timescaledb).
 -behaviour(db_backend).
 
@@ -91,7 +87,7 @@ insert_batch(#ts_state{db_pid = DB, batch_insert_stmt = Stmt, pending = P} = Sta
     Ref = epgsqla:prepared_query(DB, Stmt, TypedParams),
     {async, State#ts_state{pending = P#{Ref => {batch, Rows}}}}.
 
-%% Fires an async prepared query to record a sensor status change; the ack is intentionally ignored.
+%% Fires an async prepared query to record a sensor status change. The ack is intentionally ignored.
 insert_status(#ts_state{db_pid = DB, insert_status_stmt = Stmt} = State,
               DeviceName, Status) ->
     #statement{types = Types} = Stmt,
@@ -106,8 +102,8 @@ handle_result({DB, Ref, Result},
               #ts_state{db_pid = DB, pending = P} = State) when is_reference(Ref) ->
     case maps:take(Ref, P) of
         {Pending, Rest} ->
-            %% Take the ref on the error path too — leaving it behind leaks `pending` for the life
-            %% of the worker, the same ratcheting failure as the finding-2 timer leak.
+            %% Take the ref on the error path too. Leaving it behind leaks `pending` for the
+            %% life of the worker.
             State1 = State#ts_state{pending = Rest},
             case is_error_result(Result) of
                 true ->
@@ -131,7 +127,7 @@ terminate(#ts_state{db_pid = DB}) ->
 
 %% --- Internal helpers ---
 
-%% epgsql reports a failed statement as {error, _}; a multi-statement ack arrives as a list, so a
+%% epgsql reports a failed statement as {error, _}. A multi-statement ack arrives as a list, so a
 %% single failure anywhere in it disqualifies the whole ack.
 is_error_result({error, _}) ->
     true;
@@ -150,7 +146,7 @@ latencies_for({MsgTs, ProcStart}) ->
     FlushTime = os:system_time(microsecond),
     [{max(0, FlushTime - MsgTs), max(0, FlushTime - ProcStart)}].
 
-%% Converts epoch microseconds to the tuple epgsql binds to timestamptz; fractional seconds carry
+%% Converts epoch microseconds to the tuple epgsql binds to timestamptz. Fractional seconds carry
 %% the microseconds. See db_backend_mysql:micros_to_datetime/1, deliberately kept separate.
 micros_to_datetime(Us) ->
     Secs  = Us div 1000000,

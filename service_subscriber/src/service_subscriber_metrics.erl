@@ -15,7 +15,7 @@
 %% at all invalidates comparison against any previously collected sweep. Declared as floats so the
 %% exposed `le` labels match the Scala client's formatting exactly. prometheus.erl converts these
 %% to native units at declare time (the name ends in _milliseconds), which is why observations
-%% arrive in native units — see observe_latency/1.
+%% arrive in native units. See observe_latency/1.
 -define(LATENCY_BUCKETS, [
     0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4,
     0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 75.0,
@@ -39,8 +39,9 @@ inc_committed(N) ->
 
 %% Records the subscriber-receive-to-now latency. Takes an integer in Erlang's native time unit:
 %% prometheus_histogram:observe/2 dispatches integers to a single ets:update_counter, while a float
-%% takes a path that rebuilds a 40-atom ETS match spec per observation — measured at +69% subscriber
-%% CPU at 20k msg/s. Native also keeps sub-millisecond resolution that integer ms would lose.
+%% takes a path that rebuilds a 40-atom ETS match spec per observation, which costs far more
+%% subscriber CPU at high message rates. Native also keeps sub-millisecond resolution that integer
+%% milliseconds lose.
 observe_latency(LatencyNative) ->
     prometheus_histogram:observe(subscriber_request_latency_milliseconds, LatencyNative).
 
@@ -129,18 +130,18 @@ init([]) ->
 
     {ok, #{}}.
 
-%% No synchronous calls used; satisfy the callback contract.
+%% No synchronous calls used. Satisfy the callback contract.
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
-%% No casts used; satisfy the callback contract.
+%% No casts used. Satisfy the callback contract.
 handle_cast(_Request, State) ->
     {noreply, State}.
 
-%% No out-of-band messages expected; satisfy the callback contract.
+%% No out-of-band messages expected. Satisfy the callback contract.
 handle_info(_Info, State) ->
     {noreply, State}.
 
-%% Nothing to clean up on shutdown; Prometheus metrics live in the registry process.
+%% Nothing to clean up on shutdown. Prometheus metrics live in the registry process.
 terminate(_Reason, _State) ->
     ok.

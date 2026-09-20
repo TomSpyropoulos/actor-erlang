@@ -1,66 +1,113 @@
 # IoT Data Pipeline (Erlang/OTP)
 
-A high-performance, containerized IoT data pipeline implemented using **Erlang/OTP** and **GenServers**. This project demonstrates how to build a scalable messaging system that handles real-time sensor data using the actor model's lightweight processes and fault-tolerant principles.
+A containerized IoT data pipeline in Erlang/OTP. Publishers simulate sensors, a subscriber
+consumes their readings over MQTT, and a pluggable backend writes them to a database. This
+repository is one arm of a benchmark. An arm is one of two implementations of the same workload,
+and the other arm uses Scala and Pekko.
 
-## 🏗️ System Architecture
+## System Architecture
 
-The system consists of the following components:
+The system has six components:
 
-1.  **[Service Publisher](service_publisher/)**: An Erlang application that simulates IoT sensors. Each instance generates sensor readings (JSON) and publishes them to an MQTT broker.
-2.  **Mosquitto MQTT Broker**: Acts as the central messaging hub, facilitating communication between publishers and subscribers.
-3.  **[Service Subscriber](service_subscriber/)**: An Erlang application that consumes messages from the `sensors/#` wildcard topic. It dynamically creates a dedicated **Worker Actor** (GenServer) for each unique sensor topic to maintain state (running sum and last timestamp) while tracking metrics. Features an ultra-fast lock-free ETS-based dynamic actor routing table and a parallel DB connection pool. The write path is pluggable: the active backend is selected at runtime via `DB_BACKEND`.
+1.  **[Service Publisher](service_publisher/)**: An Erlang application that simulates IoT sensors. Each instance generates sensor readings as JSON and publishes them to an MQTT broker.
+2.  **Mosquitto MQTT Broker**: The central message hub between the publishers and the subscriber.
+3.  **[Service Subscriber](service_subscriber/)**: An Erlang application that consumes messages from the `sensors/#` wildcard topic. It creates one worker actor (a GenServer) for each sensor topic. Each worker keeps the running sum and the last timestamp of its sensor, and records metrics. A lock-free routing table in ETS (the in-memory term store of Erlang) maps each topic to its worker. A pool of database workers writes the rows in parallel. `DB_BACKEND` selects the write path at startup.
 4.  **Prometheus**: Scrapes metrics from the containers and the host system.
-5.  **Grafana**: Provides a visual dashboard for monitoring container resource usage (CPU/RAM) and application latency.
-6.  **The database**: selected by `DB_BACKEND` — TimescaleDB (default), MySQL, InfluxDB, SQLite or MongoDB. SQLite is a library, so it runs inside the subscriber rather than in a container of its own.
+5.  **Grafana**: Shows dashboards for the CPU and memory use of each container, and for application latency.
+6.  **The database**: `DB_BACKEND` selects it. The choices are TimescaleDB (default), MySQL, InfluxDB, SQLite and MongoDB. SQLite is a library, so it runs inside the subscriber and not in a container of its own.
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/)
-- [Docker Compose](https://docs.docker.com/compose/install/)
+You need [Docker](https://docs.docker.com/get-docker/) and
+[Docker Compose](https://docs.docker.com/compose/install/). Install both before you start.
 
 ### Running the Pipeline
 
-To start the entire stack with 3 simulated sensors (publisher instances):
+Start the stack with 3 simulated sensors, which are 3 publisher instances:
 
 ```bash
 docker compose up -d --build --scale publisher=3
 ```
 
-### Monitoring & Logs
+### Monitoring and Logs
 
-- **Grafana**: Accessible at [http://localhost:3000](http://localhost:3000) without authentication.
-    - Pre-provisioned with Prometheus and a "Container Monitoring" dashboard.
-- **Subscriber Metrics**: Raw Prometheus endpoint at [http://localhost:8081/metrics](http://localhost:8081/metrics).
-    - `subscriber_requests_total` — throughput counter.
-    - `subscriber_request_latency_milliseconds` — publisher→subscriber latency, histogram.
-    - `subscriber_e2e_latency_milliseconds` — publisher→DB latency, histogram.
-    - `subscriber_db_write_latency_milliseconds` — subscriber→DB write latency, histogram.
-    - `subscriber_reads_total` — completed read queries, counter. Driven by the subscriber's own
-      readers rather than by ingest traffic, so it stays at 0 unless `READS_PER_SEC` is set.
-    - `subscriber_read_latency_milliseconds` — read query latency, histogram.
-    - All four share one bucket list with the other repo, so quantiles are comparable across arms
-      by construction; `histogram_quantile()` computes them at query time over any window.
-    - `subscriber_sensor_up{device="<name>"}` — per-sensor liveness gauge (1 = ALIVE, 0 = MISSING).
-- **Subscriber Logs**:
-    ```bash
-    docker logs -f subscriber
-    ```
+Grafana runs at [http://localhost:3000](http://localhost:3000) and needs no authentication. It
+comes provisioned with Prometheus as its data source and with a "Container Monitoring" dashboard.
 
-## 🔬 Benchmarking
+The subscriber serves raw Prometheus metrics at
+[http://localhost:8081/metrics](http://localhost:8081/metrics):
 
-The subscriber's DB write path is decoupled from any specific database through a pluggable backend (`db_backend` behaviour). The active backend is selected at startup via the `DB_BACKEND` environment variable, with no recompilation required.
+- `subscriber_requests_total`: throughput counter.
+- `subscriber_request_latency_milliseconds`: publisher to subscriber latency, histogram.
+- `subscriber_e2e_latency_milliseconds`: publisher to database latency, histogram.
+- `subscriber_db_write_latency_milliseconds`: subscriber to database write latency, histogram.
+- `subscriber_reads_total`: completed read queries, counter. The readers of the subscriber drive it, and ingest traffic does not, so it stays at 0 unless you set `READS_PER_SEC`.
+- `subscriber_read_latency_milliseconds`: read query latency, histogram.
+- `subscriber_sensor_up{device="<name>"}`: per-sensor liveness gauge, where 1 is ALIVE and 0 is MISSING.
+
+The four latency histograms share one bucket list with the other arm, so quantiles are comparable
+between the arms by construction. `histogram_quantile()` computes a quantile at query time over
+any window.
+
+Follow the logs of the subscriber:
+
+```bash
+docker logs -f subscriber
+```
+
+## Benchmarking
+
+The write path of the subscriber does not depend on any one database. A pluggable backend, the
+`db_backend` behaviour, carries it. `DB_BACKEND` selects the active backend at startup, and you
+do not have to recompile.
 
 ### How `bench.sh` works
 
-`bench.sh` takes a scenario file, sources it as environment variables, starts the full Docker Compose stack with the configured number of publisher instances, and waits until the stack is actually ingesting — first for the subscriber's Prometheus endpoint to answer, then for `subscriber_requests_total` to start advancing. The second check matters because the metrics server binds before the subscriber has necessarily reached the broker or the database, so a subscriber that died during startup still serves a scrapeable `/metrics` with every counter at zero. A rep that does not begin ingesting within `INGEST_TIMEOUT` seconds (default `60`) is **skipped**: its container logs are dumped, no JSON is written, and the sweep moves on, so a dead run can never be averaged into a report cell. `bench.sh all` reports the number of skipped reps in its closing summary. It then sets up a Python virtual environment under `benchmarking/.venv` (installing `benchmarking/requirements.txt` automatically on first run — no manual setup needed) and hands off to `benchmarking/monitor.py`.
+`bench.sh` runs one benchmark. It takes a scenario file and reads it as environment variables. It
+then starts the Docker Compose stack with the configured number of publisher instances.
 
-`monitor.py` queries Prometheus directly for the same panels shown on the "Container Monitoring" Grafana dashboard (ingest rate, committed-rows rate, the four latency histograms, sensor liveness, container CPU/memory) every `METRICS_INTERVAL` seconds (default: 10) and renders them as a live-updating view: a throughput/resource table plus a latency matrix (stage × quantile, with an exact mean beside them). It also collects the raw cumulative histogram buckets, which have no dashboard panel and exist purely so a run can be re-sliced offline. Press `Ctrl+C` to stop: it prints an avg/max summary and saves every raw, timestamped sample to a JSON file under `benchmarking/output/<backend>/`.
+`bench.sh` next waits until the stack really ingests messages. It first waits for the Prometheus
+endpoint of the subscriber to answer. It then waits for `subscriber_requests_total` to advance.
+The second check matters because the metrics server binds before the subscriber reaches the
+broker or the database. A subscriber that died during startup still serves a scrapeable
+`/metrics` with every counter at zero.
 
-Aggregates cover **steady state only** — the first `WARMUP_SECONDS` (default `30`) are excluded, since throughput ramps toward steady state while publishers connect against a cold DB, and averaging that in understates throughput and inflates every latency figure. `RUN_DURATION` defaults to `90` in a sweep so a full minute of steady state remains after the trim and the 15s rate window. Every sample is still stored whole, so the trim is a reporting parameter: a run can be re-sliced at a different boundary without re-collecting it. `bench.sh` then runs a clean `docker compose down -v`.
+A rep is one measured run of one scenario. If a rep does not start to ingest within
+`INGEST_TIMEOUT` seconds (default `60`), `bench.sh` skips it. It dumps the container logs, writes
+no JSON file, and moves on, so a dead run can never enter a report cell. `bench.sh all` reports
+the number of skipped reps in its closing summary.
 
-The live view, with illustrative values — a shape, not a measurement:
+`bench.sh` then creates a Python virtual environment under `benchmarking/.venv`. It installs
+`benchmarking/requirements.txt` on the first run, so you do not have to install anything by hand.
+It then starts `benchmarking/monitor.py`.
+
+`monitor.py` queries Prometheus for the same panels that the "Container Monitoring" dashboard in
+Grafana shows. Those panels are the ingest rate, the committed-rows rate, the four latency
+histograms, sensor liveness, and the CPU and memory use of each container. It polls every
+`METRICS_INTERVAL` seconds (default `10`) and renders a live view. The view holds a table of
+throughput and resources, plus a latency matrix of stage against quantile with an exact mean
+beside it.
+
+`monitor.py` also collects the raw cumulative histogram buckets. No dashboard panel shows them,
+and they exist so that you can re-slice a run offline. Press `Ctrl+C` to stop. `monitor.py` then
+prints a summary of averages and maxima, and saves every raw timestamped sample to a JSON file
+under `benchmarking/output/<backend>/`.
+
+Every reported figure covers steady state only, which is the part of a run after the startup
+transient. `WARMUP_SECONDS` (default `30`) sets how much of the start each report excludes, and
+this excluded part is the trim. Throughput ramps toward steady state while the publishers connect
+against a cold database. An average over that ramp understates throughput and inflates every
+latency figure. `RUN_DURATION` defaults to `90` in a sweep, so a full minute of steady state
+remains after the trim and the 15s rate window.
+
+The trim is a reporting parameter and not a collection parameter. `monitor.py` stores every
+sample whole, so you can re-slice a run at a different boundary without collecting it again.
+`bench.sh` then runs a clean `docker compose down -v`.
+
+The live view looks like this. The values are illustrative and show the shape of the view, not a
+measurement.
 
 ```
 === Benchmark: <scenario>.env ===
@@ -80,23 +127,74 @@ The live view, with illustrative values — a shape, not a measurement:
   db  (sub->db)    26.8    43.2    52.4    76.1
 ```
 
-`msgs/s` counts messages **ingested** off MQTT, while `committed/s` counts rows **actually written to the database**. They track each other while the DB keeps up; a sustained gap between them is the clearest signal that the write path — not the pipeline — is the bottleneck.
+`msgs/s` counts the messages that the subscriber ingests from MQTT. `committed/s` counts the rows
+that the database really writes. The two track each other while the database keeps up. A
+sustained gap between them is the clearest signal that the write path is the bottleneck, not the
+pipeline.
 
-**Single vs. batch mode.** `bench.sh <scenario>` runs one scenario interactively (stop with `Ctrl+C`). Set `RUN_DURATION` to run it unattended for a fixed number of seconds instead. `bench.sh all` sweeps **every** scenario in `benchmarking/scenarios/` back-to-back: it builds the images once up front, runs each for `RUN_DURATION` seconds (default `90`), writes one JSON per rep to `benchmarking/output/<backend>/`, and tears the stack down (`docker compose down -v`) between reps so each starts cold.
+### Single runs and sweeps
 
-**Repetitions.** Each scenario is run `REPS` times (default `1`, but `3` in `bench.sh all`), tearing the stack down between reps so run-to-run noise can be told apart from a real runtime difference. Each rep's JSON is tagged `..._repN_...json`. Set `REPS` on a single scenario too (with `RUN_DURATION`) to repeat it unattended.
+`bench.sh <scenario>` runs one scenario interactively, and `Ctrl+C` stops it. Set `RUN_DURATION`
+to run one scenario unattended for a fixed number of seconds instead.
 
-**Post-run report.** After a full `bench.sh all` sweep, `benchmarking/report.py` aggregates every per-rep JSON into [`benchmarking/output/timescaledb/report.csv`](benchmarking/output/timescaledb/report.csv) (one row per scenario) and [`benchmarking/output/timescaledb/report.md`](benchmarking/output/timescaledb/report.md) — one such pair per backend. The Markdown report has three parts: one **headline** table per OFAT group, a **startup** table, and a **provenance** block recording the trim, run duration, bucket-list fingerprint and rep counts needed to reproduce or re-slice the figures.
+`bench.sh all` sweeps every scenario in `benchmarking/scenarios/` one after another. It builds the
+images first. It runs each scenario for `RUN_DURATION` seconds (default `90`). It writes one JSON
+file per rep to `benchmarking/output/<backend>/`. It runs `docker compose down -v` between reps,
+so every rep starts cold.
 
-Headline tables report `msgs_s` (ingested) alongside `committed_s` (committed to the DB), and p50/p95/p99/p999 plus an exact mean for each of the four latencies — all over steady state only. Throughput and resource cells are `mean ± stdev` across reps. Latency cells are a **pooled quantile**: the reps' steady-state histogram buckets are summed and one quantile taken over the total, with the per-rep min–max shown where the reps disagreed by more than 5%. Averaging per-rep quantiles instead can report a value no rep ever observed — three reps whose p99s are 10 ms, 10 ms and 300 ms average to 107 ms, while the p99 of the same 3000 observations is 300 ms. The per-rep spread is what shows when the reps were not interchangeable.
+### Repetitions
 
-The startup table carries one row per scenario: how long the stack took to serve metrics and then to ingest its first message, the measured time-to-steady-state, and the warm-up p99 — turning the startup transient from a contaminant into the JVM-ramp-vs-BEAM-flat-start comparison it should be. Time-to-steady-state is reported, never used to trim: a per-rep trim would give the two arms windows of different length and phase. `bench.sh all` first clears `benchmarking/output/<backend>/*.json` so the report covers only that sweep, and only for the backend being swept; run a single scenario and invoke `report.py` yourself if you'd rather accumulate runs across sweeps. Run it standalone at any time against an existing `output/` directory:
+`bench.sh` runs each scenario `REPS` times. `REPS` defaults to `1`, and `bench.sh all` sets it to
+`3`. The stack goes down between reps, so you can distinguish run-to-run noise from a real
+difference between the runtimes. Each rep writes a JSON file tagged `..._repN_...json`. You can
+set `REPS` on a single scenario too, together with `RUN_DURATION`, to repeat it unattended.
+
+### Post-run report
+
+After a full `bench.sh all` sweep, `benchmarking/report.py` aggregates every per-rep JSON file.
+It writes one pair of files per backend:
+[`benchmarking/output/timescaledb/report.csv`](benchmarking/output/timescaledb/report.csv), with
+one row per scenario, and
+[`benchmarking/output/timescaledb/report.md`](benchmarking/output/timescaledb/report.md).
+
+The Markdown report has three parts. The first is one headline table per scenario group, and the
+section "Available scenarios" below describes the groups. The second is a startup table. The
+third is a provenance block, which records the trim, the run duration, the fingerprint of the
+bucket list and the rep counts. Those four values are what you need to reproduce or re-slice the
+figures.
+
+A headline table reports `msgs_s`, which is ingested, beside `committed_s`, which is committed to
+the database. It also reports p50, p95, p99 and p999, plus an exact mean, for each of the four
+latencies. Every cell covers steady state only. Throughput and resource cells are a mean and a
+standard deviation across the reps.
+
+A latency cell is a pooled quantile. `report.py` sums the steady-state histogram buckets of all
+reps and takes one quantile over the total. It shows the per-rep minimum and maximum where the
+reps disagreed by more than 5%. An average of per-rep quantiles can report a value that no rep
+observed. Three reps with p99 values of 10 ms, 10 ms and 300 ms average to 107 ms. The p99 of the
+same 3000 observations is 300 ms. The per-rep spread is what shows you that the reps were not
+interchangeable.
+
+The startup table carries one row per scenario. The row gives four figures. The first two are how long
+the stack took to serve metrics and how long it then took to ingest its first message. The other
+two are the measured time to steady state and the warm-up p99. Those figures turn the startup
+transient from a contaminant into a measurement of its own. They compare the ramp of the JVM
+against the flat start of the BEAM.
+
+`report.py` reports the time to steady state but never trims by it. A per-rep trim gives the two
+arms windows of different length and phase.
+
+`bench.sh all` first deletes `benchmarking/output/<backend>/*.json`, so the report covers only
+that sweep and only the backend under test. If you want to accumulate runs across sweeps, run a
+single scenario and call `report.py` yourself. You can run `report.py` at any time against an
+existing `output/` directory:
 
 ```bash
 benchmarking/.venv/bin/python benchmarking/report.py
 ```
 
-To override the poll interval, set `METRICS_INTERVAL` in your scenario file or environment (defaults: `5`s in duration mode, `10`s interactive).
+To change the poll interval, set `METRICS_INTERVAL` in your scenario file or in the environment.
+It defaults to `5` seconds in duration mode and to `10` seconds in interactive mode.
 
 ### Running a scenario
 
@@ -116,23 +214,37 @@ RUN_DURATION=90 ./bench.sh benchmarking/scenarios/load_p20.env
 DB_BACKEND=<backend> ./bench.sh all
 ```
 
-**Choosing the database.** `DB_BACKEND` is a launch-time choice, not part of a scenario: it selects
-which `docker-compose.<backend>.yaml` fragment is loaded alongside the base compose file, so only
-that database's container ever starts. It defaults to `timescaledb`, and `bench.sh` fails
-immediately with the list of available backends if no such fragment exists. Scenario files
-therefore carry only the factors they vary — no `DB_BACKEND`, no connection settings — which is
-what lets one set of 30 describe every database and stay byte-identical to the other repo's set.
+### Choosing the database
 
-Each backend's runs and report land in their own directory, `benchmarking/output/<backend>/`, so
-sweeping a second database can never overwrite the first's results.
+`DB_BACKEND` is a launch-time choice and not part of a scenario. It selects which
+`docker-compose.<backend>.yaml` fragment loads beside the base compose file, so only that
+database ever starts. It defaults to `timescaledb`. If no such fragment exists, `bench.sh` stops
+at once and prints the list of available backends.
+
+Scenario files therefore carry only the factors that they vary. They carry no `DB_BACKEND` and no
+connection variables. That is what lets one set of 30 files describe every database and stay
+byte-identical to the set in the other arm.
+
+Each backend writes its runs and its report to its own directory,
+`benchmarking/output/<backend>/`. A sweep of a second database can therefore never overwrite the
+results of the first.
 
 ### Available scenarios
 
-All 30 scenarios follow a **one-factor-at-a-time (OFAT)** design: every file changes exactly one variable from a shared **anchor** (`20` publishers ≈ 20k msg/s, pool `20`, batching on at size `50` / timeout `200`ms, no payload padding), so any measured effect is attributable to that one factor.
+All 30 scenarios follow a one-factor-at-a-time (OFAT) design. Every file changes exactly one
+variable from a shared anchor, so any measured effect belongs to that one factor. The anchor is
+20 publishers (about 20k msg/s), a pool of 20, batching on at size `50` and timeout `200`ms, and
+no payload padding.
 
-The anchor batches because the single-row write path cannot sustain 20k msg/s: rows queue ahead of the database and end-to-end latency climbs for as long as the run lasts, which makes the measured percentiles a function of `RUN_DURATION` rather than of the runtime under test. The `Batching` group keeps one `BATCH_ENABLED=false` run as the reference point showing that.
+The anchor batches because the single-row write path cannot sustain 20k msg/s. Rows queue ahead
+of the database, and end-to-end latency climbs for as long as the run lasts. The measured
+percentiles then depend on `RUN_DURATION` rather than on the runtime under test. The `Batching`
+group keeps one `BATCH_ENABLED=false` run as the reference point that shows this.
 
-Seven files are configuration-identical to the anchor (`load_p20`, `pool_20`, `payload_0`, `batchsize_050`, `batchto_0200`, `batching_on`, `reads_0000`). That redundancy is deliberate: at `REPS=3` a sweep measures the anchor 21 times, and the spread across those runs is the noise floor that differences elsewhere in the report should be judged against.
+Seven files are identical in configuration to the anchor: `load_p20`, `pool_20`, `payload_0`,
+`batchsize_050`, `batchto_0200`, `batching_on` and `reads_0000`. That redundancy is deliberate. At
+`REPS=3` a sweep measures the anchor 21 times. The spread across those runs is the noise floor,
+and you must judge every other difference in the report against it.
 
 | Group | File pattern | Factor swept | Values (**bold** = anchor) |
 |-------|--------------|--------------|----------------------------|
@@ -144,154 +256,185 @@ Seven files are configuration-identical to the anchor (`load_p20`, `pool_20`, `p
 | Batching | `batching_{off,on}.env` | `BATCH_ENABLED` | off, **on** |
 | DB reads | `reads_{NNNN}.env` | `READS_PER_SEC` | **0**, 20, 50, 80, 100 |
 
-The two batch factors are not independent: a buffer flushes on whichever trigger fires first, so the
-**effective batch size** is roughly `min(BATCH_SIZE, per-writer rate × BATCH_TIMEOUT_MS)`. Rows are routed
-round-robin across `DB_POOL_SIZE` writers, and at the anchor a buffer fills well before the timeout expires,
-which makes `BATCH_SIZE` the binding trigger under load and leaves the timeout as the latency guard for
-low-rate periods. Sweeping the timeout below the fill time therefore does not measure the timeout so much as
-silently shrink the effective batch. Where the timeout is the shorter of the two (`batchto_0050` at the
-anchor) the timer wins every cycle rather than racing the buffer, because it is armed on the first row of
-each new buffer instead of free-running — so the flush period is fixed and the resulting tail is *tighter*
-than a size-triggered one, not noisier.
+The two batch factors are not independent. A buffer flushes on whichever trigger fires first, so
+the effective batch size is roughly `min(BATCH_SIZE, per-writer rate × BATCH_TIMEOUT_MS)`. The
+dispatcher routes rows round-robin across `DB_POOL_SIZE` writers. At the anchor a buffer fills
+well before the timeout expires, so `BATCH_SIZE` is the binding trigger under load. The timeout
+guards latency in low-rate periods. A sweep of the timeout below the fill time therefore
+does not measure the timeout. It shrinks the effective batch instead.
 
-**The read group is deliberately artificial load.** `READ_POOL_SIZE` reader actors inside the subscriber
-each run one query at a time — `SELECT avg(Value), count(*) FROM Data WHERE Timestamp > now() - interval
-'5 seconds'`, fixed text and byte-identical across arms — so the point is concurrent query pressure on the
-database and on the runtime's schedulers, not a realistic query mix. Reads live in the subscriber rather
-than a separate container precisely because a separate container would contend for the database but not for
-either runtime's schedulers or dispatchers, which is the only part that can distinguish the two arms.
+Where the timeout is the shorter of the two, as in `batchto_0050` at the anchor, the timer wins
+every cycle instead of racing the buffer. The writer arms the timer on the first row of each new
+buffer and does not let it free-run. The flush period is therefore fixed, and the resulting tail
+is tighter than a size-triggered tail, not noisier.
 
-A reader arms its next read only once the previous one has *returned*, so at most one query per reader is
-ever in flight and `READS_PER_SEC` can never build a backlog. The delay is computed against a **fixed
-deadline** that advances by exactly one period per cycle, not as period-minus-query-time: the latter leaves
-each cycle carrying whatever the runtime spends outside the measured read, and that overhead differed enough
-between the two arms that they ran measurably different read loads at the same setting. Deadline pacing
-absorbs a constant lateness entirely.
+The read group is artificial load, by design. `READ_POOL_SIZE` reader actors inside the
+subscriber each run one query at a time. The query is `SELECT avg(Value), count(*) FROM Data
+WHERE Timestamp > now() - interval '5 seconds'`, with fixed text that is byte-identical in both
+arms. The point is concurrent query pressure on the database and on the schedulers of the
+runtime, not a realistic query mix.
 
-The target is still a ceiling rather than a guarantee, so **report the achieved rate
-(`subscriber_reads_total`), never the configured one** — an unreachable target shows up as an achieved rate
-below it rather than as an error, at any setting.
+The readers live inside the subscriber and not in a separate container. A separate container
+contends for the database but not for the schedulers or dispatchers of either runtime. That
+contention is the only part that can distinguish the two arms.
 
-Reads also change the connection budget: total database connections are `DB_POOL_SIZE + READ_POOL_SIZE`
-while reads are on and `DB_POOL_SIZE` when `READS_PER_SEC=0`, identically in both arms. `READ_POOL_SIZE` is
-documented but never swept — holding it fixed is what keeps the group's connection count constant and
-independent of `PUBLISHER_COUNT`, so the read curve is not confounded by a moving connection count.
+A reader arms its next read only after the previous read returns. At most one query per reader is
+ever in flight, so `READS_PER_SEC` can never build a backlog. The reader computes the delay
+against a fixed deadline. That deadline advances by exactly one period per cycle, and not by the
+period minus the query time. Period-minus-query-time leaves each cycle carrying whatever the runtime
+spends outside the measured read. That overhead differed enough between the two arms that they
+ran measurably different read loads at the same setting. Deadline pacing absorbs a constant
+lateness in full.
 
-The no-batch-vs-batch comparison is the `Batching` group: `batching_off.env` versus
-`batching_on.env` (the latter identical to the anchor).
+The target is a ceiling and not a guarantee. Report the achieved rate from
+`subscriber_reads_total`, never the configured one. At any setting, a target that the readers
+cannot reach appears as an achieved rate below the target and not as an error.
+
+Reads also change the connection budget. Total database connections are `DB_POOL_SIZE +
+READ_POOL_SIZE` while reads are on, and `DB_POOL_SIZE` when `READS_PER_SEC=0`. Both arms behave
+identically here. This README documents `READ_POOL_SIZE`, but no scenario sweeps it. A fixed
+`READ_POOL_SIZE` keeps the connection count of the group constant and independent of
+`PUBLISHER_COUNT`, so a moving connection count cannot confound the read curve.
+
+The `Batching` group holds the comparison between no batching and batching: `batching_off.env`
+against `batching_on.env`, and the second is identical to the anchor.
 
 ### Scenario variables reference
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PUBLISHER_COUNT` | `1` | Number of publisher containers (`--scale publisher=N`) |
-| `DB_BACKEND` | `timescaledb` | Which database to run against. Set on the command line, **not** in a scenario file; selects the `docker-compose.<backend>.yaml` fragment |
-| `DB_HOST` | `timescaledb` | Database host (`mysql`, `influxdb` or `mongodb` under those backends). Supplied by the backend's compose fragment; identical key in both arms |
-| `DB_PORT` | `5432` | Database port (`3306` MySQL, `8086` InfluxDB, `27017` MongoDB). Supplied by the backend's compose fragment; identical key in both arms |
-| `DB_NAME` | `epu` | Database name, and the bucket name under `DB_BACKEND=influxdb`. Supplied by the backend's compose fragment; identical key in both arms |
-| `DB_USER` / `DB_PASSWORD` | `postgres` | Database credentials (`root` / `mysql` under MySQL, `root` / `mongo` under MongoDB, which authenticates against its `admin` database). Supplied by the backend's compose fragment. Under `DB_BACKEND=influxdb` these seed the initial user only — the API authenticates with `DB_TOKEN` — and InfluxDB enforces an 8-character minimum password |
-| `DB_ORG` / `DB_TOKEN` | `epu` / `epu-benchmark-token` | InfluxDB only: the organisation and API token. The two keys beyond the five every backend reads; supplied by the compose fragment and read identically in both arms |
-| `DB_PATH` / `DB_INIT_DIR` | `/var/lib/sqlite/epu.db` / `/sqlite/init` | SQLite only: the database file, on the `sqlite-storage` volume, and the mounted directory holding `init.sql` and `connection.sql`. The five network keys above go unused. Supplied by the compose fragment and read identically in both arms |
-| `DB_POOL_SIZE` | `20` | Number of DB pool workers, and the total database connection count (one per worker). Status writes round-robin over the same pool. Under `DB_BACKEND=influxdb` it caps concurrent HTTP requests instead of counting pooled connections, so the connection count is only an upper bound. Under `DB_BACKEND=sqlite` it is the number of connections queuing on one write lock. Under `DB_BACKEND=mongodb` each connection carries several pipelined writes at once |
+| `DB_BACKEND` | `timescaledb` | Which database to run against. Set it on the command line and not in a scenario file. It selects the `docker-compose.<backend>.yaml` fragment |
+| `DB_HOST` | `timescaledb` | Database host (`mysql`, `influxdb` or `mongodb` under those backends). The compose fragment of the backend supplies it, and both arms read the same key |
+| `DB_PORT` | `5432` | Database port (`3306` MySQL, `8086` InfluxDB, `27017` MongoDB). The compose fragment of the backend supplies it, and both arms read the same key |
+| `DB_NAME` | `epu` | Database name, and the bucket name under `DB_BACKEND=influxdb`. The compose fragment of the backend supplies it, and both arms read the same key |
+| `DB_USER` / `DB_PASSWORD` | `postgres` | Database credentials (`root` / `mysql` under MySQL, and `root` / `mongo` under MongoDB, which authenticates against its `admin` database). The compose fragment supplies them. Under `DB_BACKEND=influxdb` they seed the initial user only, because the API authenticates with `DB_TOKEN`, and InfluxDB enforces a minimum password length of 8 characters |
+| `DB_ORG` / `DB_TOKEN` | `epu` / `epu-benchmark-token` | InfluxDB only: the organization and the API token. These are the two keys beyond the five that every backend reads. The compose fragment supplies them, and both arms read them identically |
+| `DB_PATH` / `DB_INIT_DIR` | `/var/lib/sqlite/epu.db` / `/sqlite/init` | SQLite only: the database file on the `sqlite-storage` volume, and the mounted directory that holds `init.sql` and `connection.sql`. This backend does not use the five network keys above. The compose fragment supplies them, and both arms read them identically |
+| `DB_POOL_SIZE` | `20` | Number of database pool workers, and the total connection count, because each worker holds one connection. Status writes round-robin over the same pool. Under `DB_BACKEND=influxdb` it caps concurrent HTTP requests instead of counting pooled connections, so the connection count is an upper bound only. Under `DB_BACKEND=sqlite` it is the number of connections that queue on one write lock. Under `DB_BACKEND=mongodb` each connection carries several pipelined writes at once |
 | `BATCH_ENABLED` | `false` | Enable row buffering |
-| `BATCH_SIZE` | `100` | Flush when buffer reaches this many rows |
-| `BATCH_TIMEOUT_MS` | `1000` | Flush after this many ms even if buffer is not full |
-| `PAYLOAD_PADDING_BYTES` | `0` | Extra filler bytes added as a trailing `"padding"` field on top of the shared base payload (identical in both arms), for payload-size benchmarks |
-| `READS_PER_SEC` | `0` | Aggregate target read rate across all readers. `0` starts no readers at all — no actors, no connections, no timers. Achieved rate falls below this once the target exceeds what the readers can sustain |
-| `READ_POOL_SIZE` | `4` | Reader actors, each holding one database connection, so total connections are `DB_POOL_SIZE + READ_POOL_SIZE` while reads are on. Documented but not swept |
-| `RUN_DURATION` | _(unset)_ | Fixed measurement window in seconds. Set it (or use `bench.sh all`, which defaults it to `90`) for an unattended run; leave unset for an interactive `Ctrl+C` run |
-| `WARMUP_SECONDS` | `30` | Startup transient excluded from every reported figure. Must be at least the 15s rate window, or the first samples kept are still contaminated by the ramp |
-| `STARTUP_TIMEOUT` | `180` | Seconds a rep may take to bring up a scrapeable metrics endpoint before it is skipped |
-| `INGEST_TIMEOUT` | `60` | Seconds a rep may take to start ingesting, once its endpoint answers, before it is skipped |
-| `REPS` | `1` | Times each scenario is repeated, with a full teardown between reps (`bench.sh all` defaults it to `3`). The report collapses reps to mean ± stdev, and pools their histogram buckets for latency |
-| `METRICS_INTERVAL` | `5` / `10` | Seconds between metric snapshots (defaults to `5` in duration mode, `10` interactive) |
+| `BATCH_SIZE` | `100` | Flush when the buffer reaches this many rows |
+| `BATCH_TIMEOUT_MS` | `1000` | Flush after this many milliseconds, even if the buffer is not full |
+| `PAYLOAD_PADDING_BYTES` | `0` | Extra filler bytes, added as a trailing `"padding"` field on top of the shared base payload (identical in both arms), for payload-size benchmarks |
+| `READS_PER_SEC` | `0` | Aggregate target read rate across all readers. `0` starts no readers at all: no actors, no connections, no timers. The achieved rate falls below this target once the target exceeds what the readers can sustain |
+| `READ_POOL_SIZE` | `4` | Reader actors. Each holds one database connection, so total connections are `DB_POOL_SIZE + READ_POOL_SIZE` while reads are on. Documented but not swept |
+| `RUN_DURATION` | _(unset)_ | Fixed measurement window in seconds. Set it, or use `bench.sh all`, which defaults it to `90`, for an unattended run. Leave it unset for an interactive run that you stop with `Ctrl+C` |
+| `WARMUP_SECONDS` | `30` | Startup transient excluded from every reported figure. It must be at least the 15s rate window, or the first samples kept still carry the ramp |
+| `STARTUP_TIMEOUT` | `180` | Seconds a rep can take to serve a scrapeable metrics endpoint before `bench.sh` skips it |
+| `INGEST_TIMEOUT` | `60` | Seconds a rep can take to start ingesting, once its endpoint answers, before `bench.sh` skips it |
+| `REPS` | `1` | Times `bench.sh` repeats each scenario, with a full teardown between reps (`bench.sh all` defaults it to `3`). The report collapses the reps to a mean and a standard deviation, and pools their histogram buckets for latency |
+| `METRICS_INTERVAL` | `5` / `10` | Seconds between metric snapshots (`5` in duration mode, `10` interactive) |
 
 ### Supported `DB_BACKEND` values
 
 | Value | Modules | Description |
 |-------|---------|-------------|
-| `timescaledb` (default) | `db_backend_timescaledb`, `db_read_backend_timescaledb` | PostgreSQL/TimescaleDB via epgsql, async writes |
-| `mysql` | `db_backend_mysql`, `db_read_backend_mysql` | MySQL 8.4 via mysql-otp. The driver is synchronous, so writes are handed to a short-lived spawned process and the ack is messaged back — the backend still satisfies the behaviour's `{async, State}` contract |
-| `influxdb` | `db_backend_influxdb`, `db_read_backend_influxdb` | InfluxDB 2.7 over its HTTP API via `httpc`, no driver dependency. Writes are line protocol posted asynchronously, so the ack reaches the worker's mailbox and the behaviour's `{async, State}` contract is satisfied without a helper process |
-| `sqlite` | `db_backend_sqlite`, `db_read_backend_sqlite`, `db_backend_sqlite_lock` | SQLite embedded through the esqlite NIF, so there is no database container. An esqlite handle cannot be shared between processes, so writes run inline in the pool worker and return the behaviour's `{sync, ...}` form, each holding one node-wide write lock |
-| `mongodb` | `db_backend_mongodb`, `db_read_backend_mongodb` | MongoDB 8.0 via mongodb-erlang's `mc_worker_api`. The driver's calls block, so writes are handed to a short-lived spawned process and the ack is messaged back, as with `mysql`. Every write waits for the journal (`j: true`), and a batch is one `insert` command |
+| `timescaledb` (default) | `db_backend_timescaledb`, `db_read_backend_timescaledb` | PostgreSQL and TimescaleDB through epgsql, with async writes |
+| `mysql` | `db_backend_mysql`, `db_read_backend_mysql` | MySQL 8.4 through mysql-otp. The driver is synchronous, so the backend hands each write to a short-lived spawned process, which messages the ack back. The backend still satisfies the `{async, State}` contract of the behaviour |
+| `influxdb` | `db_backend_influxdb`, `db_read_backend_influxdb` | InfluxDB 2.7 over its HTTP API through `httpc`, with no driver dependency. The backend posts line protocol asynchronously, so the ack reaches the mailbox of the worker. It satisfies the `{async, State}` contract of the behaviour without a helper process |
+| `sqlite` | `db_backend_sqlite`, `db_read_backend_sqlite`, `db_backend_sqlite_lock` | SQLite embedded through the esqlite NIF (a natively implemented function), so there is no database container. Two processes cannot share an esqlite handle, so each write runs inline in the pool worker and returns the `{sync, ...}` form of the behaviour. Every write holds one node-wide write lock |
+| `mongodb` | `db_backend_mongodb`, `db_read_backend_mongodb` | MongoDB 8.0 through the `mc_worker_api` of mongodb-erlang. The calls of the driver block, so the backend hands each write to a short-lived spawned process, which messages the ack back, as with `mysql`. Every write waits for the journal (`j: true`), and a batch is one `insert` command |
 
-Each SQL value needs its own `<backend>/init/init.sql`, written in that database's own dialect, so
-the schemas are equivalent rather than identical. `influxdb` has none: it is schema-on-write, the
-image creates the bucket, and what the columns are is decided by the backend's line-protocol
-builders. So no file pins the schema across the two arms, and a missing `precision=us` on the write
-URL fails silently by landing every point in 1970. `sqlite` has no server to run a schema, so
-`sqlite/init/` holds `init.sql` plus a `connection.sql` for the settings SQLite keeps per connection,
-and the subscriber applies both every time it opens a connection. `mongodb` has
-`mongodb/init/init.js`, which the image runs to create a time-series `Data` collection and a
-`sensor_status` collection whose validator stands in for the SQL `CHECK`.
+Each SQL value needs its own `<backend>/init/init.sql`, written in the dialect of that database,
+so the two schemas are equivalent rather than identical.
 
-Adding a backend is three things in this repo: the modules, their one-line registrations, and a
-`docker-compose.<backend>.yaml` fragment carrying that database's service, volume and connection
-variables (for SQLite, only a volume and two variables on the subscriber), plus a schema if that
-database needs one. Nothing in `benchmarking/` changes — the
-scenario files are backend-agnostic.
+`influxdb` has no schema file. It is schema-on-write, the image creates the bucket, and the
+line-protocol builders of the backend decide what the columns are. No file therefore pins the
+schema across the two arms. A missing `precision=us` on the write URL then fails silently and
+lands every point in 1970.
 
-> **MySQL cannot pipeline.** One connection carries one query at a time, so in-flight writes are
-> capped at `DB_POOL_SIZE` where epgsql can hold several per connection. With `BATCH_ENABLED=false`
-> that cap is binding at the swept load and the subscriber builds an unbounded backlog; with
-> batching on it keeps up comfortably. So `pool_*` and `batching_*` results are not comparable
-> across databases.
+`sqlite` has no server to run a schema, so `sqlite/init/` holds `init.sql` plus a
+`connection.sql` for the settings that SQLite keeps per connection. The subscriber applies both
+every time it opens a connection. `mongodb` has `mongodb/init/init.js`, which the image runs to
+create a time-series `Data` collection and a `sensor_status` collection whose validator stands in
+for the SQL `CHECK`.
 
-> **InfluxDB is HTTP, which changes three things.** `DB_POOL_SIZE` caps concurrent requests rather
-> than counting connections; a write is an upsert keyed by timestamp rather than an append; and one
-> Flux read costs far more than its SQL equivalent, so the `reads_*` scenarios are already at their
-> ceiling by `reads_0050`. HTTP also connects lazily, so both backends probe for readiness at startup rather
-> than let a rep ingest while committing nothing. This backend's `pool_*`, `batching_*` and `reads_*`
-> numbers are not comparable with the SQL ones.
+Adding a backend is three things in this repo. The first two are the modules and their one-line
+registrations. The third is a `docker-compose.<backend>.yaml` fragment that carries the service,
+the volume and the connection variables of that database. For SQLite the fragment carries only a volume and two variables on
+the subscriber. Add a schema as well if that database needs one. Nothing in `benchmarking/`
+changes, because the scenario files do not depend on the backend.
 
-> **SQLite runs inside the subscriber, which changes what most groups measure.** It allows one
-> writer for the whole database, so every write takes an in-process lock first, and `pool_*` measures
-> how many writers queue on that lock rather than how many write at once. Every commit fsyncs, so
-> `batching_off` builds a backlog, and `batchsize_020` and the higher-load `load_*` scenarios are expected to as well. 
-> esqlite runs on dirty IO schedulers the readers share with the writers, so `reads_*` latency can include 
-> waiting for one, and no read crosses a network. The subscriber's CPU and memory include the database,
-> and there is no database container to start. 
+### What each backend changes
 
-> **MongoDB stores readings in a time-series collection, and its drivers differ between the arms.**
-> The collection's time field is a BSON Date, so stored timestamps keep milliseconds, not
-> microseconds; the latency metrics are unaffected, since they come from the payload. Every write
-> waits for the journal, so `batching_off` builds a backlog at the swept load, and `batchsize_020`
-> and the higher-load `load_*` scenarios may as well. The read window scans every bucket, and buckets
-> accumulate as rows are written, so `reads_*` latency may grow with run length. This arm's driver
-> pipelines several writes on each connection while the Java driver sends one at a time, so this
-> backend's `pool_*` and `batching_off` numbers compare the drivers as much as the runtimes.
+#### MySQL cannot pipeline
 
-## 🧠 Deep Dive: Erlang Concurrency
+One connection carries one query at a time, so in-flight writes are capped at `DB_POOL_SIZE`,
+where epgsql can hold several per connection. With `BATCH_ENABLED=false` that cap binds at the
+swept load, and the subscriber builds an unbounded backlog. With batching on it keeps up. The
+`pool_*` and `batching_*` results are therefore not comparable across databases.
 
-### Lightweight Processes vs. OS Threads
+#### InfluxDB speaks HTTP
 
-The project leverages Erlang's unique concurrency model, which is built on **Lightweight Processes** rather than OS threads.
+HTTP changes three things. `DB_POOL_SIZE` caps concurrent requests instead of counting
+connections. A write is an upsert keyed by timestamp instead of an append. One Flux read costs
+far more than its SQL equivalent, so the `reads_*` scenarios are already at their ceiling by
+`reads_0050`.
 
-#### Erlang Processes
-Unlike OS threads, Erlang processes are managed by the Erlang Runtime System (ERTS).
-- **Lightweight**: Each process starts with only a few kilobytes of memory, allowing for millions of concurrent processes.
-- **Preemptive**: The Erlang Scheduler ensures that no single process can hog the CPU, providing fair distribution of execution time.
-- **Pros**: Extremely efficient for massive concurrency and fault-tolerant systems.
-- **Cons**: Requires a different mental model (message passing) compared to shared-state concurrency.
+HTTP also connects lazily, so both backends probe for readiness at startup. Without that probe a
+rep can ingest while it commits nothing. The `pool_*`, `batching_*` and `reads_*` numbers of this
+backend are not comparable with the SQL ones.
 
-#### Fault Tolerance (Let It Crash)
-Erlang's "Let It Crash" philosophy is implemented through supervisors and process monitoring.
-- **Behavior**: Instead of defensive programming with complex try-catch blocks, Erlang encourages failing fast and allowing a supervisor to restart the process to a known good state.
-- **Advantage**: Creates highly resilient systems where localized failures do not bring down the entire application.
+#### SQLite runs inside the subscriber
 
-The current implementation uses **GenServers** to encapsulate state and logic, managed by a supervisor tree defined in `service_subscriber_sup.erl`.
+SQLite allows one writer for the whole database, so every write takes an in-process lock first.
+`pool_*` therefore measures how many writers queue on that lock, rather than how many write at
+once. Every commit fsyncs, so `batching_off` builds a backlog, and `batchsize_020` and the
+higher-load `load_*` scenarios are expected to build one as well.
 
-## 🛠️ Tech Stack
+esqlite runs on the dirty IO schedulers that the readers share with the writers, so `reads_*`
+latency can include a wait for one of them. No read crosses a network. The CPU and memory of
+the subscriber include the database, and no database container starts.
 
-- **Language**: Erlang/OTP
-- **Concurrency**: GenServers & Lightweight Processes
-- **Messaging**: MQTT (Mosquitto/via emqtt)
-- **JSON**: Built-in json (OTP 27+)
-- **Observability**: Prometheus & Grafana
-- **Database**: Pluggable backends — TimescaleDB (default), MySQL, InfluxDB, SQLite (embedded), MongoDB
-- **Deployment**: Docker & Docker Compose
+#### MongoDB stores readings in a time-series collection
 
-## 📄 License
+The time field of the collection is a BSON Date, so stored timestamps keep milliseconds and not
+microseconds. The latency metrics come from the payload, so this does not affect them. Every
+write waits for the journal, so `batching_off` builds a backlog at the swept load.
+`batchsize_020` and the higher-load `load_*` scenarios can build one as well. The read window
+scans every bucket, and buckets accumulate as the backend writes rows, so `reads_*` latency can
+grow with run length.
 
-MIT — see [`LICENSE`](LICENSE).
+The drivers also differ between the arms. The driver of this arm pipelines several writes on each
+connection, while the Java driver sends one at a time. The `pool_*` and `batching_off` numbers of
+this backend therefore compare the drivers as much as the runtimes.
+
+## Deep Dive: Erlang Concurrency
+
+### Lightweight Processes against OS Threads
+
+This project uses the concurrency model of Erlang, which builds on lightweight processes instead
+of OS threads.
+
+#### Erlang processes
+
+The Erlang Runtime System (ERTS) manages Erlang processes, and the operating system does not.
+
+- Each process starts with a few kilobytes of memory, so one node can run millions of processes at the same time.
+- The Erlang scheduler is preemptive. No single process can hold the CPU, and every process gets a fair share of execution time.
+- The model is efficient for large-scale concurrency and for fault-tolerant systems.
+- The model needs a different way of thinking. Processes pass messages, and they do not share state.
+
+#### Fault tolerance, or let it crash
+
+Erlang implements the "let it crash" philosophy through supervisors and process monitoring. A
+process does not defend itself with complex try-catch blocks. It fails fast, and a supervisor
+restarts it into a known good state. A local failure therefore does not bring down the whole
+application.
+
+This implementation uses GenServers to hold state and logic. The supervisor tree in
+`service_subscriber_sup.erl` manages them.
+
+## Tech Stack
+
+- Language: Erlang/OTP
+- Concurrency: GenServers and lightweight processes
+- Messaging: MQTT, through Mosquitto and emqtt
+- JSON: the built-in json module (OTP 27 and later)
+- Observability: Prometheus and Grafana
+- Database: pluggable backends, which are TimescaleDB (default), MySQL, InfluxDB, SQLite (embedded) and MongoDB
+- Deployment: Docker and Docker Compose
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).

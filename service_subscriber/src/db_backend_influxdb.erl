@@ -1,13 +1,9 @@
 %% @doc InfluxDB backend implementing the db_backend behaviour. One instance per pool worker, each
 %% owning a named httpc profile capped at one session so DB_POOL_SIZE still bounds write
-%% concurrency. Buffering belongs to the dispatcher (service_subscriber_db); what lives here is how
-%% a write is executed and how its ack is correlated back to the rows it covered.
-%%
-%% Writes are HTTP, which changes readiness, what DB_POOL_SIZE counts and whether a repeated write
-%% appends; read findings I through O in audit.md before comparing this backend with the other two.
-%%
-%% Reads the five DB_* variables plus DB_ORG and DB_TOKEN; defaults live in
-%% docker-compose.influxdb.yaml.
+%% concurrency. Buffering belongs to the dispatcher (service_subscriber_db). Writes are HTTP, so
+%% DB_POOL_SIZE caps in-flight requests rather than connections, a repeated write upserts rather
+%% than appends, and the connection is lazy enough that init/2 must probe for readiness. Reads the
+%% five DB_* variables plus DB_ORG and DB_TOKEN.
 -module(db_backend_influxdb).
 -behaviour(db_backend).
 
@@ -16,7 +12,8 @@
 -export([init/2, insert/5, insert_batch/2, insert_status/3, handle_result/2, terminate/1]).
 
 %% `profile`: This worker's own httpc profile, so its socket is shared with no other worker.
-%% `write_url`: The /api/v2/write URL, built once. precision=us is load-bearing; see finding L.
+%% `write_url`: The /api/v2/write URL, built once. precision=us is load-bearing: without it every
+%%   point lands in 1970 and the read window is silently empty.
 %% `headers`: Authorization, built once from DB_TOKEN.
 %% `pending`: httpc request id -> {MsgTimestampUs, ProcStartUs}, or {batch, Rows} for batch acks.
 -record(influx_state, {
@@ -92,8 +89,8 @@ insert_status(State, DeviceName, Status) ->
 handle_result({http, {Id, Result}}, #influx_state{pending = P} = State) ->
     case maps:take(Id, P) of
         {Pending, Rest} ->
-            %% Take the id on the error path too -- leaving it behind leaks `pending` for the life
-            %% of the worker, the same ratcheting failure as the finding-2 timer leak.
+            %% Take the id on the error path too. Leaving it behind leaks `pending` for the
+            %% life of the worker.
             State1 = State#influx_state{pending = Rest},
             case is_error_result(Result) of
                 true ->
@@ -119,13 +116,11 @@ terminate(#influx_state{profile = Profile}) ->
 
 %% Starts this worker's own profile, replacing any left behind by a previous incarnation: a profile
 %% is a child of the inets supervisor and outlives the worker, so a restart would otherwise hit
-%% {error, {already_started, _}} and crash-loop into the supervisor's restart intensity.
-%%
-%% One session per profile is what makes DB_POOL_SIZE bound write concurrency. max_keep_alive_length
-%% is that session's queue depth, not its wire concurrency, and it must be deep enough to absorb a
-%% worker's in-flight writes or httpc opens a throwaway connection for the overflow; finding J in
-%% audit.md has the measurements. The runtime atom is bounded by DB_POOL_SIZE and built once per
-%% worker, as in service_subscriber_db:worker_name/1.
+%% {error, {already_started, _}} and crash-loop into the supervisor's restart intensity. One session
+%% per profile is what makes DB_POOL_SIZE bound write concurrency, and max_keep_alive_length is that
+%% session's queue depth rather than its wire concurrency: too shallow and httpc opens a throwaway
+%% connection for the overflow. The atom is built once per worker, as in
+%% service_subscriber_db:worker_name/1.
 start_profile(Name) ->
     Profile = list_to_atom(Name),
     _ = inets:stop(httpc, Profile),
@@ -137,7 +132,7 @@ start_profile(Name) ->
 
 %% Blocks until the bucket answers, so a database that is not up crashes this worker at init the way
 %% epgsql and mysql-otp do. HTTP connects lazily, so without this the subscriber would start, ingest
-%% happily and commit nothing -- a rep bench.sh would score as valid. See finding I.
+%% happily and commit nothing, which bench.sh would score as a valid rep.
 await_ready(_Url, _Headers, _Profile, 0) ->
     error(influxdb_not_ready);
 await_ready(Url, Headers, Profile, Attempts) ->
@@ -162,18 +157,19 @@ post(#influx_state{profile = Profile, write_url = Url, headers = Headers}, Body)
 
 %% One reading as a line-protocol point, as an iolist so no copy is made to flatten it. The trailing
 %% i keeps Value an integer: field type is fixed by the first write into a shard, so dropping it
-%% would silently store floats. Nothing is escaped -- see finding N for why that is safe here.
+%% would silently store floats. Nothing is escaped, because a DeviceName is "sensor" plus a
+%% container hostname and carries no comma, space or equals sign.
 line(DeviceName, Value, MsgTs) ->
     [<<"Data,DeviceName=">>, DeviceName, <<" Value=">>, integer_to_binary(Value),
      <<"i ">>, integer_to_binary(MsgTs)].
 
 %% One status transition as a point, with no timestamp so the server assigns one -- the equivalent
-%% of the DEFAULT NOW() both SQL schemas give reportedat. Status is a string field; the two SQL
+%% of the DEFAULT NOW() both SQL schemas give reportedat. Status is a string field. The two SQL
 %% schemas' CHECK constraint has no InfluxDB equivalent.
 status_line(DeviceName, Status) ->
     [<<"sensor_status,DeviceName=">>, DeviceName, <<" Status=\"">>, Status, <<"\"">>].
 
-%% InfluxDB acks a write with 204 and an empty body; any other status, or a transport failure,
+%% InfluxDB acks a write with 204 and an empty body. Any other status, or a transport failure,
 %% means the rows did not land.
 is_error_result({{_Vsn, 204, _}, _Headers, _Body}) ->
     false;

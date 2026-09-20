@@ -50,7 +50,7 @@ handle_call({publish, Topic, Payload}, _From, State = #state{conn_pid = Pid}) ->
     Res = emqtt:publish(Pid, Topic, Payload, 0),
     {reply, Res, State}.
 
-%% No casts used; satisfy the callback contract.
+%% No casts used. Satisfy the callback contract.
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -87,14 +87,14 @@ handle_info(publish_tick,
                            sensor = SensorBin,
                            padding_size = PaddingSize}) ->
     RandomValue = rand:uniform(10),
-    %% Same clock and resolution as service_subscriber_worker's arrival stamp; erlang:system_time
-    %% is a different (corrected) clock, so don't swap it in. The 6-digit fraction is fixed-width,
+    %% Same clock and resolution as service_subscriber_worker's arrival stamp. Do not swap in
+    %% erlang:system_time, a different (corrected) clock. The 6-digit fraction is fixed-width,
     %% which keeps the payload a constant size.
     NowUs = os:system_time(microsecond),
     Timestamp = calendar:system_time_to_rfc3339(NowUs, [{unit, microsecond}, {offset, "Z"}]),
     %% Shared wire format: compact, this field order, unquoted value. Byte-identical to data/2 in
     %% actor-scala/service-publisher/src/main/scala/com/publisher/Main.scala and parsed by
-    %% fast_parse_timestamp/1; json:encode would reorder the keys.
+    %% fast_parse_timestamp/1, because json:encode reorders the keys.
     Padding = case PaddingSize of
         0 -> <<>>;
         _ -> [<<",\"padding\":\"">>, binary:copy(<<"x">>, PaddingSize), $"]

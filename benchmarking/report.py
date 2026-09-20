@@ -21,7 +21,7 @@ from pathlib import Path
 # (keyed "<panel> / <series>", value {"avg","max"}): a fixed key for scalar series, or a panel
 # prefix summed across its series (CPU/memory total across containers, as the live table does).
 # monitor.py now computes `aggregates` over steady-state samples only, so these are steady-state
-# figures — they read higher than pre-migration runs, which averaged the startup ramp in.
+# figures. They read higher than pre-migration runs, which averaged the startup ramp in.
 SERIES_METRICS = [
     ("msgs_s", "messages_per_second / value"),
     ("committed_s", "committed_per_second / value"),
@@ -47,7 +47,7 @@ LATENCY_NAMES = [f"{prefix}_{q}" for prefix, _ in LATENCY_STAGES for q, _ in QUA
                 [f"{prefix}_mean" for prefix, _ in LATENCY_STAGES]
 METRIC_NAMES = SCALAR_NAMES + LATENCY_NAMES
 
-# Pretty section titles for the OFAT groups parsed out of scenario stems; unknown groups fall
+# Pretty section titles for the OFAT groups parsed out of scenario stems. Unknown groups fall
 # back to a title-cased name.
 GROUP_TITLES = {
     "load": "Load", "pool": "Pool", "payload": "Payload",
@@ -56,7 +56,7 @@ GROUP_TITLES = {
 }
 
 
-# Parse an `le="..."` series key into its numeric bucket bound; "+Inf" becomes infinity so the
+# Parse an `le="..."` series key into its numeric bucket bound. "+Inf" becomes infinity so the
 # bounds sort into the order histogram_quantile expects.
 def parse_bound(series_label):
     value = series_label.split('=', 1)[1].strip('"') if '=' in series_label else series_label
@@ -97,7 +97,7 @@ def pool_buckets(vectors):
 
 # Quantile of a cumulative-bucket histogram, following Prometheus' histogram_quantile semantics:
 # linear interpolation inside the bucket the rank falls in, and a rank landing in the +Inf bucket
-# clamps to the highest finite bound. Accuracy is therefore bounded by the bucket width — in
+# clamps to the highest finite bound. Accuracy is therefore bounded by the bucket width, in
 # milliseconds, unlike the rank error of the CKMS summary this replaced.
 def histogram_quantile(quantile, buckets):
     if not buckets:
@@ -144,7 +144,7 @@ def extract_histograms(run):
             # transient including what happened before monitor.py's first sample.
             "warmup": buckets_at(steady[0], panel),
         }
-    # No stage at all means a pre-migration run with no bucket panels; the legacy estimator reads it.
+    # No stage at all means a pre-migration run with no bucket panels. The legacy estimator reads it.
     return stages or None
 
 
@@ -207,7 +207,7 @@ def extract_legacy_latencies(aggregates):
 
 
 # Split a scenario file name ("load_p20.env") into its OFAT group and factor value ("load", "p20")
-# for report sectioning; names that don't fit collapse to (stem, "-"). The `timescale_` strip is a
+# for report sectioning. Names that do not fit collapse to (stem, "-"). The `timescale_` strip is a
 # fallback for runs archived before the backend left the file name -- current scenarios carry no
 # backend prefix, since one set of files is shared by every DB_BACKEND.
 def parse_group_value(scenario):
@@ -252,7 +252,7 @@ def load_runs(output_dir):
 
 # Reduce a scenario's reps to one row: scalars as mean ± stdev, latencies as a pooled quantile over
 # the summed steady-state buckets with the per-rep min/max kept beside it as the dispersion signal
-# (pooling assumes the reps are exchangeable; the spread is what shows when they were not).
+# (pooling assumes the reps are exchangeable, and the spread is what shows when they were not).
 def summarize(runs):
     summary = {}
     for name in SCALAR_NAMES:
@@ -316,7 +316,7 @@ def summarize_startup(runs):
         values = [v for v in values if v is not None]
         return statistics.mean(values) if values else None
 
-    # Only runs that recorded a trim boundary can be judged against one; a pre-migration run has
+    # Only runs that recorded a trim boundary can be judged against one. A pre-migration run has
     # no warmup_seconds and would otherwise count as "not settled" for free.
     settled = [(time_to_steady_state(r), r.get("warmup_seconds")) for r in runs]
     ttss = [v for v, _ in settled if v is not None]

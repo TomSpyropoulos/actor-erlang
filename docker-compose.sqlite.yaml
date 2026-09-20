@@ -1,7 +1,6 @@
 # SQLite fragment: everything specific to DB_BACKEND=sqlite. Loaded alongside docker-compose.yaml the
 # same way as the other fragments. SQLite is a library inside the subscriber, so this file adds no
-# service, no healthcheck and no depends_on edge; it only extends the subscriber. See findings P
-# through U in audit.md.
+# service, no healthcheck and no depends_on edge. It only extends the subscriber.
 services:
   # Both arms read these two keys -- see db_backend_sqlite.erl in actor-erlang and SQLiteBackend in
   # actor-scala -- so this file is byte-identical in the two repos. The five network DB_* keys mean

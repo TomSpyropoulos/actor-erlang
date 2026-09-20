@@ -1,12 +1,9 @@
 %% @doc SQLite backend implementing the db_backend behaviour. SQLite is a library, not a server, so
 %% each pool worker opens its own connection to one shared file through the esqlite NIF. Buffering
-%% and the batch triggers belong to the dispatcher (service_subscriber_db).
-%%
-%% The only backend that writes inline and returns {sync, ...}: an esqlite handle is not safe to use
-%% from several processes, so db_backend_mysql's spawned helper is not an option. Every write holds
-%% db_backend_sqlite_lock. Read findings Q through S in audit.md before comparing pool_* or reads_*.
-%%
-%% Reads DB_PATH and DB_INIT_DIR; their defaults live in docker-compose.sqlite.yaml.
+%% and the batch triggers belong to the dispatcher (service_subscriber_db). The only backend that
+%% writes inline and returns {sync, ...}: an esqlite handle is not safe to use from several
+%% processes, so db_backend_mysql's spawned helper is not an option. Every write holds
+%% db_backend_sqlite_lock. Reads DB_PATH and DB_INIT_DIR.
 -module(db_backend_sqlite).
 -behaviour(db_backend).
 
@@ -33,8 +30,8 @@
 
 %% --- API Functions ---
 
-%% Opens a connection and applies both setup files under the write lock; finding R in audit.md says
-%% why setup needs it. Exported so db_read_backend_sqlite cannot open a connection any other way.
+%% Opens a connection and applies both setup files under the write lock, since applying the schema
+%% writes and SQLite allows one writer. Exported so db_read_backend_sqlite opens one no other way.
 %% Crashes on any error, so a bad path or schema fails at init. Mirrors SQLiteBackend.open().
 open() ->
     Path = os:getenv("DB_PATH",     "/var/lib/sqlite/epu.db"),
@@ -71,7 +68,7 @@ init(Index, _Opts) ->
     {ok, #sq_state{conn = Conn, insert = Insert, status = Status}}.
 
 %% Writes one row in autocommit. The write has already returned, so latency is measured here and
-%% reported through {sync, ...}; a failed write reports nothing committed.
+%% reported through {sync, ...}. A failed write reports nothing committed.
 insert(#sq_state{insert = Stmt} = State, DeviceName, Value, MsgTs, ProcStart) ->
     Rows = [{DeviceName, Value, MsgTs, ProcStart}],
     {sync, committed(locked(fun() -> write_rows(Stmt, Rows) end), Rows), State}.

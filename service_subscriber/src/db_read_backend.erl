@@ -1,12 +1,9 @@
 %% @doc Behaviour for pluggable database read backends. Each of the reader's GenServers owns one
-%% instance of the module DB_BACKEND selects, plus its connection.
-%%
-%% Cadence is NOT part of this contract. service_subscriber_reader owns READS_PER_SEC, the per-reader
-%% period, the re-arming timer and the metrics, so no backend can reinterpret the swept read rate.
-%% Same split db_backend uses for the batch factors.
-%%
-%% To add a backend: implement all three callbacks, then add a clause in
-%% service_subscriber_reader:resolve_read_backend/0.
+%% instance of the module DB_BACKEND selects, plus its connection. Cadence is NOT part of this
+%% contract: service_subscriber_reader owns READS_PER_SEC, the per-reader period, the re-arming
+%% timer and the metrics, so no backend can reinterpret the swept read rate, the same split
+%% db_backend uses for the batch factors. To add a backend, implement all three callbacks and add a
+%% clause in service_subscriber_reader:resolve_read_backend/0.
 -module(db_read_backend).
 
 %% Called once per reader at startup. Index is the reader's slot number

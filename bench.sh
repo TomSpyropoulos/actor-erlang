@@ -24,8 +24,8 @@ COMPOSE=(docker compose -f "$REPO/docker-compose.yaml" -f "$DB_COMPOSE")
 # Per-backend, so a second database's sweep cannot overwrite the first's runs or its report.
 OUTPUT_DIR="$BENCH_DIR/output/$DB_BACKEND"
 
-# How long a rep may take to become measurable before it is abandoned. Startup covers image start
-# plus the database's initdb; ingestion covers broker connect and the first messages arriving.
+# How long a rep can take to become measurable before it is abandoned. Startup covers image start
+# plus the database's initdb. Ingestion covers broker connect and the first messages arriving.
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-180}"
 INGEST_TIMEOUT="${INGEST_TIMEOUT:-60}"
 # Startup transient excluded from every reported figure. Must be at least the 15s rate window used
@@ -63,7 +63,7 @@ subscriber_requests() {
 
 # Run a single scenario end-to-end: bring the stack up, wait until it is actually ingesting,
 # then hand off to monitor.py. Returns non-zero if the stack never became measurable. Runs in a subshell so the scenario's
-# sourced variables don't leak into the next iteration (which would let a stale value
+# sourced variables do not leak into the next iteration (which would let a stale value
 # like PAYLOAD_PADDING_BYTES override the next scenario's compose interpolation).
 # Args: <scenario-file> <build|nobuild> <rep>
 run_one() (
@@ -75,7 +75,7 @@ run_one() (
     local default_interval; default_interval=$([[ -n "${RUN_DURATION:-}" ]] && echo 5 || echo 10)
     local interval="${METRICS_INTERVAL:-$default_interval}"
 
-    # Only pass --duration when RUN_DURATION is set; without it monitor.py stays
+    # Only pass --duration when RUN_DURATION is set. Without it monitor.py stays
     # interactive and waits for Ctrl+C (the original single-run behaviour).
     local duration_arg=()
     [[ -n "${RUN_DURATION:-}" ]] && duration_arg=(--duration "$RUN_DURATION")
@@ -124,7 +124,7 @@ run_one() (
 
     echo "Ready. Launching metrics view..."
     echo ""
-    # Foreground so Ctrl+C reaches monitor.py directly in interactive mode; `|| true`
+    # Foreground so Ctrl+C reaches monitor.py directly in interactive mode. `|| true`
     # keeps `set -e` from short-circuiting before teardown runs when it returns.
     # The gate waits above are the only place a slow runtime boot is observable: monitor.py starts
     # counting from the first ingested message, so without passing them the JVM-vs-BEAM startup
@@ -143,7 +143,7 @@ run_one() (
 
 # Run one scenario REPS times, tearing the stack down between reps so each starts cold and
 # its run-to-run spread is real (not warm-cache carryover). The first rep honours the caller's
-# build flag; later reps reuse those images (nobuild) so a multi-rep run rebuilds only once.
+# build flag. Later reps reuse those images (nobuild) so a multi-rep run rebuilds only once.
 run_reps() {
     local scenario="$1" build="$2"
     local reps="${REPS:-1}"
@@ -199,7 +199,7 @@ if [[ "$MODE" == all ]]; then
 else
     # Single-scenario mode. Interactive (Ctrl+C) unless RUN_DURATION is set, in which
     # case it runs unattended for that many seconds. Rebuilds to pick up code changes.
-    # REPS defaults to 1; set it (with RUN_DURATION) to repeat an unattended single scenario.
+    # REPS defaults to 1. Set it (with RUN_DURATION) to repeat an unattended single scenario.
     [[ -f "$MODE" ]] || { echo "scenario file not found: $MODE" >&2; exit 1; }
     run_reps "$MODE" build
 fi

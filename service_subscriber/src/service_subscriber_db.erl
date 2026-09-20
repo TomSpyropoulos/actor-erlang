@@ -1,13 +1,10 @@
 %% @doc DB dispatcher -- one GenServer per connection (pool of DB_POOL_SIZE workers), round-robin
 %% routed, each delegating to the backend module DB_BACKEND selects (default: timescaledb).
-%%
 %% Batching lives here, not in the backend: this module owns the row buffer, the BATCH_SIZE /
-%% BATCH_TIMEOUT_MS triggers and the flush timer, and hands the backend either a single row or a
-%% whole flushed buffer, so every backend sees identical batching semantics. Mirrors
-%% BatchWriterActor.scala -- keep the flush triggers in sync.
-%%
-%% Async correlation and latency computation stay with the backend. The dispatcher forwards every
-%% message it does not own to handle_result/2 and records the latency pairs that come back.
+%% BATCH_TIMEOUT_MS triggers and the flush timer, so every backend sees identical batching
+%% semantics. Mirrors BatchWriterActor.scala -- keep the flush triggers in sync. Async correlation
+%% and latency computation stay with the backend: the dispatcher forwards every message it does not
+%% own to handle_result/2 and records the latency pairs that come back.
 -module(service_subscriber_db).
 -behaviour(gen_server).
 
@@ -25,7 +22,7 @@
 %% `batch_enabled`: Whether rows are buffered here before being handed to the backend.
 %% `batch_size`: Flush threshold in rows.
 %% `batch_timeout_ms`: Flush threshold in milliseconds since the first buffered row.
-%% `buffer`: Rows awaiting flush, newest first; reversed into arrival order on flush.
+%% `buffer`: Rows awaiting flush, newest first. Reversed into arrival order on flush.
 %% `buffer_count`: Row count in `buffer`, tracked separately to avoid an O(n) length/1 scan per insert.
 %% `timer_ref`: The in-flight flush timer, or undefined when no buffering cycle is open.
 -record(state, {
@@ -91,7 +88,7 @@ init([Index]) ->
                 buffer_count     = 0,
                 timer_ref        = undefined}}.
 
-%% No synchronous calls used; satisfy the callback contract.
+%% No synchronous calls used. Satisfy the callback contract.
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
@@ -109,10 +106,10 @@ handle_cast({insert, DeviceName, Value, MsgTs, ProcStart},
     S1 = S#state{buffer = [{DeviceName, Value, MsgTs, ProcStart} | Buf], buffer_count = NewCount},
     if
         NewCount >= BatchSize ->
-            %% Batch full — flush immediately.
+            %% Batch full, so flush immediately.
             {noreply, flush(S1)};
         NewCount =:= 1 ->
-            %% First row in a new batch — ensure timer is running.
+            %% First row in a new batch, so ensure the timer is running.
             {noreply, schedule_timer(S1)};
         true ->
             {noreply, S1}
@@ -130,8 +127,8 @@ handle_cast(_Msg, State) ->
 
 %% Flushes any buffered rows when the timeout fires. Deliberately does NOT re-arm: the next row to
 %% arrive re-arms via the NewCount =:= 1 branch in handle_cast/2, so at most one timer is ever live
-%% per buffering cycle. Re-arming unconditionally here is what let a leaked timer replace itself on
-%% every firing, so the live-timer count could only ever grow.
+%% per buffering cycle. Re-arming unconditionally here lets a leaked timer replace itself on every
+%% firing, so the live-timer count only ever grows.
 handle_info(flush_batch, #state{buffer = Buf} = State) ->
     %% Cleared before flush/1 so it skips cancelling a timer that has already fired.
     State1 = State#state{timer_ref = undefined},
@@ -202,7 +199,7 @@ schedule_timer(State) ->
     State.
 
 %% Stores the backend's new state and, for a backend that wrote synchronously, records the rows it
-%% already measured. Async writes report nothing here; their ack lands in handle_info/2 instead.
+%% already measured. Async writes report nothing here. Their ack lands in handle_info/2 instead.
 apply_insert_result({async, NewBS}, S) ->
     S#state{backend_state = NewBS};
 apply_insert_result({sync, {E2E, Sub}, NewBS}, S) ->

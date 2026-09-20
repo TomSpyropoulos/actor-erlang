@@ -11,7 +11,7 @@
 
 %% A sensor silent for longer than this at heartbeat time is declared MISSING.
 %% Coupled with ?HEARTBEAT_INTERVAL_MS (5000) in service_subscriber_mqtt, which sets
-%% how often this check runs — keep the two in sync when tuning liveness sensitivity.
+%% how often this check runs. Keep the two in sync when tuning liveness sensitivity.
 -define(LIVENESS_TIMEOUT_S, 1).
 
 %% Seconds from year 0 (Erlang's gregorian epoch) to 1970-01-01, used to convert
@@ -62,7 +62,7 @@ handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
 
     service_subscriber_db:insert(DeviceName, Value, ST, ProcessingStartUs),
 
-    %% Reuse ProcessingStartUs to avoid a redundant syscall; cap at 0 for clock skew.
+    %% Reuse ProcessingStartUs to avoid a redundant syscall. Cap at 0 for clock skew.
     LatencyUs = max(0, ProcessingStartUs - ST),
 
     %% Native, not milliseconds: prometheus_histogram takes a cheap ets:update_counter path for
@@ -76,12 +76,12 @@ handle_cast(Msg, #state{topic = Topic, sum = Sum} = State) ->
 
     {noreply, State#state{
                  sum = TotalSum,
-                 %% Reuses ProcessingStartUs like LatencyUs above; the drift is nothing
+                 %% Reuses ProcessingStartUs like LatencyUs above. The drift is nothing
                  %% against the 1s ?LIVENESS_TIMEOUT_S.
                  last_seen = ProcessingStartUs div 1000000
                 }}.
 
-%% No synchronous calls used; satisfy the callback contract.
+%% No synchronous calls used. Satisfy the callback contract.
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
@@ -108,7 +108,7 @@ handle_info(heartbeat, #state{topic = Topic, last_seen = LastSeen, last_status =
     end,
 
     %% Always update the gauge so Prometheus always reflects the current state,
-    %% even when the status hasn't changed since the last heartbeat.
+    %% even when the status has not changed since the last heartbeat.
     service_subscriber_metrics:set_sensor_status(DeviceName, NewStatus),
 
     {noreply, State#state{last_status = NewStatus}};
@@ -126,7 +126,7 @@ extract_device_name(Topic) ->
         [Name]    -> Name
     end.
 
-%% Removes this worker's ETS entry on shutdown so stale routing entries don't accumulate.
+%% Removes this worker's ETS entry on shutdown so stale routing entries do not accumulate.
 terminate(_Reason, #state{topic = Topic}) ->
     ets:delete(service_subscriber_workers, Topic),
     ok.

@@ -1,12 +1,8 @@
 %% @doc InfluxDB backend implementing the db_read_backend behaviour. One instance per reader, each
 %% owning a named httpc profile capped at one session so READ_POOL_SIZE still bounds read
-%% concurrency.
-%%
-%% The read is issued synchronously, which is what read/1's contract wants, so the async dispatch
-%% db_backend_influxdb needs on the write path is deliberately absent here.
-%%
-%% Reads the five DB_* variables plus DB_ORG and DB_TOKEN; defaults live in
-%% docker-compose.influxdb.yaml.
+%% concurrency. The read is issued synchronously, which is what read/1's contract wants, so the
+%% async dispatch db_backend_influxdb needs on the write path is deliberately absent here. Reads
+%% the five DB_* variables plus DB_ORG and DB_TOKEN.
 -module(db_read_backend_influxdb).
 -behaviour(db_read_backend).
 
@@ -40,12 +36,10 @@
                     {connect_timeout, ?CONNECT_TIMEOUT_MS},
                     {ssl,             []}]).
 
-%% The InfluxDB spelling of the read group's query; see the read-group section of audit.md for why
-%% the window is bounded. group() and reduce are load-bearing for equivalence with the SQL backends'
-%% avg/count, and finding L records why.
-%%
-%% Byte-identical to InfluxReadTarget.scala, or the group compares query plans instead of runtimes.
-%% The rule is per backend: this pair must match each other, not either SQL pair.
+%% The InfluxDB spelling of the read group's query: the same bounded window. group() and reduce are
+%% load-bearing for equivalence with the SQL backends' avg/count. Byte-identical to
+%% InfluxReadTarget.scala, or the group compares query plans instead of runtimes, and the rule is
+%% per backend: this pair must match each other, not either SQL pair.
 -define(READ_FLUX,
         "from(bucket: \"~s\")\n"
         "  |> range(start: -5s)\n"

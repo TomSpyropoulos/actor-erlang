@@ -5,5 +5,5 @@
 PRAGMA busy_timeout = 10000;
 
 -- SQLite's stock default, set explicitly because esqlite's build lowers it under WAL. FULL fsyncs
--- every commit, as the server databases do on stock config; see finding T in audit.md.
+-- every commit, as the server databases do on stock config.
 PRAGMA synchronous = FULL;

@@ -20,7 +20,7 @@ services:
     healthcheck:
       # --protocol=TCP forces a TCP probe, the same fix and the same reason as the timescaledb
       # fragment's `-h 127.0.0.1`. The entrypoint runs a temporary init-time server while init.sql
-      # executes; a socket probe answers during that window, so the container was marked healthy
+      # executes. A socket probe answers during that window, so the container was marked healthy
       # during initdb, dependents were released, and MySQL then restarted to bind TCP and refused
       # connections. Every rep re-runs initdb because bench.sh tears down with `down -v`, so that
       # window would reopen on every single run.

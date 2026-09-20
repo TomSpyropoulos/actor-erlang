@@ -1,12 +1,9 @@
 %% @doc MongoDB backend implementing the db_backend behaviour. One mc_worker connection per pool
-%% worker. Buffering and the batch triggers belong to the dispatcher (service_subscriber_db); what
-%% lives here is how a write is executed and how its ack is correlated back to the rows it covered.
-%%
+%% worker. Buffering and the batch triggers belong to the dispatcher (service_subscriber_db).
 %% mc_worker_api calls block, so writes go through a spawned helper exactly as in db_backend_mysql.
-%% Every write waits for the journal, and Data is a time-series collection that stores milliseconds;
-%% read findings V through Y in audit.md before comparing this backend with the others.
-%%
-%% Reads the five DB_* connection variables; their defaults live in docker-compose.mongodb.yaml.
+%% Every write waits for the journal, and Data is a time-series collection whose BSON Date stores
+%% milliseconds rather than the payload's microseconds. mc_worker pipelines several commands per
+%% connection, so DB_POOL_SIZE does not cap in-flight writes. Reads the five DB_* variables.
 -module(db_backend_mongodb).
 -behaviour(db_backend).
 
@@ -23,7 +20,7 @@
     pending :: #{reference() => {integer(), integer()} | {batch, list()}}
 }).
 
-%% Journaled, so an ack means the same fsync the SQL backends' commits mean; see finding W.
+%% Journaled, so an ack means the same fsync the SQL backends' commits mean.
 %% Mirrors MongoDBBackend.WriteConcern.
 -define(WRITE_CONCERN, {<<"w">>, 1, <<"j">>, true}).
 
@@ -64,7 +61,7 @@ insert_batch(#mo_state{conn = Conn, pending = P} = State, Rows) ->
     {async, State#mo_state{pending = P#{Ref => {batch, Rows}}}}.
 
 %% Spawns a status write and drops its ack, matching the other backends. reportedat is the client's
-%% clock, since MongoDB has no insert-time default; see finding V.
+%% clock, since MongoDB has no insert-time default.
 insert_status(#mo_state{conn = Conn} = State, DeviceName, Status) ->
     Doc = #{<<"DeviceName">> => DeviceName, <<"Status">> => Status,
             <<"reportedat">> => os:timestamp()},
@@ -72,7 +69,7 @@ insert_status(#mo_state{conn = Conn} = State, DeviceName, Status) ->
     {ok, State}.
 
 %% Claims a helper's ack matched by ref. A failed write yields no latencies, so the dispatcher counts
-%% nothing as committed; the ref is taken on that path too, or `pending` would leak.
+%% nothing as committed. The ref is taken on that path too, or `pending` would leak.
 handle_result({mongodb_ack, Ref, Result}, #mo_state{pending = P} = State) when is_reference(Ref) ->
     case maps:take(Ref, P) of
         {Pending, Rest} ->

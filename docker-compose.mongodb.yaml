@@ -3,8 +3,7 @@
 # `docker compose` commands.
 services:
   # MongoDB Community on stock server config with no tuning flags, so no database is given an
-  # advantage the others do not get. Durability is set per write by the clients instead; see
-  # finding W in audit.md.
+  # advantage the others do not get. Durability is set per write by the clients instead.
   mongodb:
     image: mongo:8.0
     container_name: mongodb

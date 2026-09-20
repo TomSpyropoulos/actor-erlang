@@ -1,11 +1,8 @@
 %% @doc SQLite backend implementing the db_read_backend behaviour. One connection per reader, opened
 %% through db_backend_sqlite:open/0 so a reader cannot be configured apart from the writers.
-%%
 %% esqlite blocks, which is what read/1's contract wants. Under WAL a read does not wait for the
-%% writer, but it does need a dirty IO scheduler the writers also use; see finding R in audit.md.
-%%
-%% Reads DB_PATH and DB_INIT_DIR through db_backend_sqlite; their defaults live in
-%% docker-compose.sqlite.yaml.
+%% writer, but it does need a dirty IO scheduler the writers also use, so read latency can include
+%% the wait for one. Reads DB_PATH and DB_INIT_DIR through db_backend_sqlite.
 -module(db_read_backend_sqlite).
 -behaviour(db_read_backend).
 
@@ -22,7 +19,7 @@
 }).
 
 %% The SQLite spelling of the read group's query. Timestamp holds epoch microseconds, so the window
-%% bound is computed in that unit. Byte-identical to SQLiteReadTarget.scala; the matching rule is per
+%% bound is computed in that unit. Byte-identical to SQLiteReadTarget.scala. The matching rule is per
 %% backend.
 -define(READ_SQL,
         "SELECT avg(Value), count(*) FROM Data "

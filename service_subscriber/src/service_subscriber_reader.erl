@@ -1,12 +1,9 @@
 %% @doc Read-load generator -- one GenServer per reader (pool of READ_POOL_SIZE). Each owns one
 %% db_read_backend instance, runs one read at a time and paces itself, so unlike the DB dispatcher
-%% there is no round-robin: nothing is routed here.
-%%
-%% Deliberately artificial load, swept as a benchmark factor; see the read-group section of audit.md.
-%%
-%% Pacing lives here, not in the backend: this module is the only reader of READS_PER_SEC and
-%% READ_POOL_SIZE, so every backend gets identical cadence semantics. READS_PER_SEC = 0 means no
-%% readers at all -- no actors, no connections, no timers.
+%% there is no round-robin: nothing is routed here. The load is deliberately artificial and is swept
+%% as a benchmark factor. Pacing lives here, not in the backend: this module is the only reader of
+%% READS_PER_SEC and READ_POOL_SIZE, so every backend gets identical cadence semantics.
+%% READS_PER_SEC = 0 means no readers at all -- no actors, no connections, no timers.
 -module(service_subscriber_reader).
 -behaviour(gen_server).
 
@@ -19,7 +16,7 @@
 %% `backend_mod`: The db_read_backend implementation resolved from DB_BACKEND.
 %% `backend_state`: Opaque state owned by that backend, including its connection.
 %% `period_native`: This reader's share of the aggregate target rate, as a period.
-%% `next_due`: Monotonic deadline for the next read; advanced by exactly one period per cycle.
+%% `next_due`: Monotonic deadline for the next read. Advanced by exactly one period per cycle.
 -record(state, {
     backend_mod   :: module(),
     backend_state :: term(),
@@ -33,7 +30,7 @@
 start_link(Index) ->
     gen_server:start_link({local, reader_name(Index)}, ?MODULE, [Index], []).
 
-%% How many readers the supervisor should start: READ_POOL_SIZE when reads are enabled, and 0 when
+%% How many readers the supervisor starts: READ_POOL_SIZE when reads are enabled, and 0 when
 %% READS_PER_SEC is 0. Returning 0 is what makes "no reads" mean no actors, no connections and no
 %% timers, rather than idle readers that still count against the connection budget.
 reader_count() ->
@@ -60,24 +57,20 @@ init([Index]) ->
                 period_native = erlang:convert_time_unit(PeriodMs, millisecond, native),
                 next_due      = erlang:monotonic_time()}}.
 
-%% No synchronous calls used; satisfy the callback contract.
+%% No synchronous calls used. Satisfy the callback contract.
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
-%% No casts used; satisfy the callback contract.
+%% No casts used. Satisfy the callback contract.
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% Runs one read, records it, and arms the next against a fixed deadline that advances by exactly one
-%% period per cycle. Sleeping period-minus-query-time instead let per-cycle overhead outside the
-%% measured read accumulate, and it differed enough between the arms to make them run different read
-%% loads at the same READS_PER_SEC; audit.md's read-group section has the measurements. Mirrors the
-%% pacing in Reader.scala.
-%%
-%% max/2 keeps the deadline out of the past, so a reader that cannot keep up runs flat out instead of
-%% burning off a debt in a burst. With the next read armed only from a completed one, at most one is
-%% ever in flight, and an unreachable target shows up as an achieved rate below the configured one --
-%% which is why reports must use subscriber_reads_total and never the env var.
+%% Runs one read, records it, and arms the next against a fixed deadline that advances by exactly
+%% one period per cycle. Sleeping period-minus-query-time instead lets per-cycle overhead outside
+%% the measured read accumulate, which makes the achieved rate depend on the runtime. max/2 keeps
+%% the deadline out of the past, so a reader that cannot keep up runs flat out rather than bursting
+%% to clear a debt, and an unreachable target shows up as an achieved rate below the configured one.
+%% Mirrors the pacing in Reader.scala.
 handle_info(read, #state{backend_mod = Mod, backend_state = BS,
                          period_native = PeriodNative, next_due = NextDue} = State) ->
     Start = erlang:monotonic_time(),
@@ -113,7 +106,7 @@ terminate(_Reason, #state{backend_mod = Mod, backend_state = BS}) ->
 reader_name(Index) ->
     list_to_atom("service_subscriber_reader_" ++ integer_to_list(Index)).
 
-%% Aggregate target read rate across all readers; 0 disables reads entirely.
+%% Aggregate target read rate across all readers. 0 disables reads entirely.
 reads_per_sec() ->
     list_to_integer(os:getenv("READS_PER_SEC", "0")).
 

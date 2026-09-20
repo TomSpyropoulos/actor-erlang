@@ -53,12 +53,12 @@ def quantile_union(metric):
 # dragging along cAdvisor's ~30 incidental docker-compose labels. This list is a *superset* of
 # the dashboard: the `_buckets`/`_sum`/`_count` entries are collection-only and deliberately have
 # no panel, existing to be re-sliced offline rather than looked at. It is still the single source
-# of truth for what gets watched, displayed, and saved — update it here if the dashboard changes. In the rate-based panels Grafana's `$__rate_interval` is
+# of truth for what gets watched, displayed, and saved. Update it here if the dashboard changes. In the rate-based panels Grafana's `$__rate_interval` is
 # replaced with a fixed `15s` rate window: at Prometheus' 2s scrape interval that spans ~7
 # samples (stable) yet reaches a full window in 15s, so throughput/CPU settle far sooner than
 # a `1m` window's 60s. Memory is deliberately NOT one of them: it is an instant gauge read.
 # container_memory_usage_bytes is a gauge, so rate() over it reports its per-second rate of
-# change — noise around zero for a steady-state process, not footprint. working_set excludes
+# change, which is noise around zero for a steady-state process rather than footprint. working_set excludes
 # inactive page cache, so the subscriber is not credited with TimescaleDB's file cache.
 PANELS = [
     ("container_cpu_usage", 'rate(container_cpu_usage_seconds_total{name!=""}[15s])', "name"),
@@ -178,7 +178,7 @@ def compute_aggregates(samples):
             for series_label, value in series.items():
                 if not math.isnan(value):
                     series_values[f"{panel_name} / {series_label}"].append(value)
-    # Reduce each group's collected values down to its avg/max; series with no real
+    # Reduce each group's collected values down to its avg/max. Series with no real
     # observations yet (still all-NaN) are omitted rather than reported as NaN/NaN.
     return {
         key: {"avg": sum(values) / len(values), "max": max(values)}
@@ -207,9 +207,9 @@ def _series_sum(panels, panel_name):
 def render_table(sample):
     """Build the live view: a throughput/resource table plus a latency matrix (stage x quantile),
     stacked vertically so no column has to be truncated to fit the terminal width."""
-    # Render a numeric value with an optional unit suffix, or "?" while data is missing —
-    # either the series doesn't exist yet (None) or it's a summary with no observations
-    # yet (NaN, e.g. before the first DB write completes during pipeline warm-up).
+    # Render a numeric value with an optional unit suffix, or "?" while data is missing. The
+    # series either does not exist yet (None) or is a summary with no observations yet (NaN,
+    # for example before the first DB write completes during pipeline warm-up).
     def fmt(value, suffix=""):
         return "?" if value is None or math.isnan(value) else f"{value:.1f}{suffix}"
 
@@ -325,7 +325,7 @@ def main():
     else:
         console.print(f"Polling {args.prometheus_url} every {args.interval}s. Press Ctrl+C to stop.\n")
     try:
-        # Run the poll loop inside a live-updating view; it stops on Ctrl+C, or once
+        # Run the poll loop inside a live-updating view. It stops on Ctrl+C, or once
         # --duration seconds have elapsed when a fixed-duration run was requested.
         with Live(render_view(None, started_at), refresh_per_second=4, console=console) as live:
             for sample in poll_loop(args.prometheus_url, args.interval, started_at):
@@ -334,10 +334,10 @@ def main():
                 if args.duration is not None and sample["elapsed_seconds"] >= args.duration:
                     break
     except KeyboardInterrupt:
-        pass  # user requested stop — fall through to summarizing and saving
+        pass  # user requested stop, so fall through to summarizing and saving
     finally:
-        # Always compute, print, and persist results — even on an unexpected exception —
-        # so a long benchmark run's data isn't lost.
+        # Always compute, print, and persist results, even on an unexpected exception, so a
+        # long benchmark run's data is not lost.
         # Aggregate over steady state only, but persist every sample: the trim is a reporting
         # parameter, so a run must stay re-sliceable at a different boundary without re-collecting.
         measured = steady_state(samples, args.warmup)

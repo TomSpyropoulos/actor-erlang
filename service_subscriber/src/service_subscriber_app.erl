@@ -13,6 +13,6 @@ start(_Type, _Args) ->
     prometheus_httpd:start(),
     service_subscriber_sup:start_link().
 
-%% Nothing to tear down on stop; OTP shuts down the supervision tree automatically.
+%% Nothing to tear down on stop. OTP shuts down the supervision tree automatically.
 stop(_State) ->
     ok.

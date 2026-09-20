@@ -4,10 +4,10 @@
 #
 # Unlike the two SQL fragments there is no influxdb/init/init.sql: InfluxDB is schema-on-write, and
 # the only thing to create is the bucket, which the image's setup mode creates itself. The schema
-# such as it is lives in the two arms' line-protocol builders; see finding L in audit.md.
+# such as it is lives in the two arms' line-protocol builders.
 services:
   # InfluxDB 2.7, run on stock config with no tuning flags so no database is given an advantage the
-  # others do not get. Setup mode provisions org, bucket and admin token on a fresh volume; it is
+  # others do not get. Setup mode provisions org, bucket and admin token on a fresh volume. It is
   # skipped silently on a volume that already holds a database, which is safe only because bench.sh
   # tears down with `down -v` between reps. The backends probe readiness at init rather than trust it.
   influxdb:
