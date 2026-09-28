@@ -1,6 +1,6 @@
 # Fault report
 
-Source: `benchmarking/output/faults/timescaledb` — 3 fault runs.
+Source: `benchmarking/output/faults/mongodb` — 2 fault runs.
 
 Each run holds a dependency down for a fixed outage and watches what the pipeline does. Every column is derived from the subscriber's raw cumulative counters, not from a rate panel, because a 15s rate window smears the abrupt stop these runs are about.
 
@@ -10,9 +10,8 @@ A sample where the subscriber served no metrics at all counts as stopped: from t
 
 | scenario | target | outage_s | rep | sub_restarted | restarts | dark_s | ingest_stop_s | ingest_resume_s | commit_stop_s | commit_resume_s | final_gap |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| load_p20.env | broker | 30 | 1 | yes | actor-erlang-publisher-1 x5, actor-erlang-publisher-10 x5, actor-erlang-publisher-11 x4, actor-erlang-publisher-12 x4, actor-erlang-publisher-13 x4, actor-erlang-publisher-14 x4, actor-erlang-publisher-15 x5, actor-erlang-publisher-16 x5, actor-erlang-publisher-17 x4, actor-erlang-publisher-18 x5, actor-erlang-publisher-19 x5, actor-erlang-publisher-2 x4, actor-erlang-publisher-20 x4, actor-erlang-publisher-3 x4, actor-erlang-publisher-4 x5, actor-erlang-publisher-5 x5, actor-erlang-publisher-6 x5, actor-erlang-publisher-7 x4, actor-erlang-publisher-8 x5, actor-erlang-publisher-9 x4, subscriber x4 | 40 | 2 | 18 | 2 | 18 | 992 |
-| load_p20.env | db | 30 | 1 | yes | none | 34 | 2 | 10 | 2 | 10 | 519 |
-| load_p20.env | db | 30 | 1 | yes | subscriber x7 | 36 | 2 | 12 | 2 | 12 | 891 |
+| load_p20.env | broker | 30 | 1 | yes | actor-erlang-publisher-1 x4, actor-erlang-publisher-10 x4, actor-erlang-publisher-11 x4, actor-erlang-publisher-12 x4, actor-erlang-publisher-13 x4, actor-erlang-publisher-14 x5, actor-erlang-publisher-15 x5, actor-erlang-publisher-16 x4, actor-erlang-publisher-17 x5, actor-erlang-publisher-18 x5, actor-erlang-publisher-19 x4, actor-erlang-publisher-2 x5, actor-erlang-publisher-20 x4, actor-erlang-publisher-3 x4, actor-erlang-publisher-4 x4, actor-erlang-publisher-5 x5, actor-erlang-publisher-6 x4, actor-erlang-publisher-7 x4, actor-erlang-publisher-8 x5, actor-erlang-publisher-9 x5, subscriber x3 | 40 | 2 | 17 | 2 | 17 | 950 |
+| load_p20.env | db | 30 | 1 | yes | subscriber x7 | 36 | 2 | 12 | 2 | 12 | 575 |
 
 `final_gap` is ingested minus committed at the last sample. A gap that stays open is a subscriber that kept accepting messages it can no longer write. Where the subscriber restarted, both counters restarted with it, so the gap covers only the time since.
 
@@ -25,37 +24,26 @@ The `sensor_status` blast radius is not derived here, because reading it needs a
 
 | phase | samples | unreachable | ingested | committed | ingest/s | commit/s |
 |---|---|---|---|---|---|---|
-| baseline | 29 | 0 | 1,159,291 | 1,159,350 | 19,988 | 19,989 |
+| baseline | 29 | 0 | 1,158,965 | 1,159,000 | 19,982 | 19,983 |
 | outage | 14 | 13 | 0 | 0 | 0 | 0 |
-| recovery | 38 | 7 | 1,159,947 | 1,159,950 | 15,262 | 15,262 |
+| recovery | 38 | 7 | 1,199,780 | 1,199,350 | 15,787 | 15,781 |
 
 ## load_p20.env — db, 30s outage (rep 1)
 
-- `61s` — `docker compose stop timescaledb`
-- `90s` — `docker compose start timescaledb`
+- `61s` — `docker compose stop mongodb`
+- `90s` — `docker compose start mongodb`
 
 | phase | samples | unreachable | ingested | committed | ingest/s | commit/s |
 |---|---|---|---|---|---|---|
-| baseline | 29 | 0 | 1,119,986 | 1,120,000 | 19,310 | 19,310 |
+| baseline | 29 | 0 | 1,159,697 | 1,159,250 | 19,995 | 19,987 |
 | outage | 14 | 13 | 0 | 0 | 0 | 0 |
-| recovery | 38 | 4 | 1,319,958 | 1,320,000 | 17,368 | 17,368 |
-
-## load_p20.env — db, 30s outage (rep 1)
-
-- `61s` — `docker compose stop timescaledb`
-- `90s` — `docker compose start timescaledb`
-
-| phase | samples | unreachable | ingested | committed | ingest/s | commit/s |
-|---|---|---|---|---|---|---|
-| baseline | 29 | 0 | 1,159,978 | 1,160,000 | 20,000 | 20,000 |
-| outage | 14 | 13 | 0 | 0 | 0 | 0 |
-| recovery | 38 | 5 | 1,319,992 | 1,320,000 | 17,368 | 17,368 |
+| recovery | 38 | 5 | 1,319,983 | 1,320,300 | 17,368 | 17,372 |
 
 ## Provenance
 
 | key | value |
 |---|---|
-| runs | 3 |
+| runs | 2 |
 | sample interval | 2s |
 | fault injected at | 61 s elapsed |
 | outage lengths | 30 s |
